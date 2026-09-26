@@ -280,10 +280,12 @@ def build_diff(
     subs: list | None = None,
     labels: dict[str, str] | None = None,
     match_threshold: float = 0.5,
+    *,
+    allow_cross_format: bool = False,
 ) -> DiffResult:
     """Diff constraints and bus interactions of two same-representation dumps.
 
-    Raises DiffError unless both dumps are the same representation. ``subs`` is
+    Raises DiffError unless both dumps are the same representation and allow_cross_format is False. ``subs`` is
     the block's ``_substitutions.json`` list (annotates removed columns);
     ``labels`` is the ``bus_map`` (id -> name) for bus labels.
     """
@@ -291,7 +293,7 @@ def build_diff(
     fa, fb = detect_format(a_data), detect_format(b_data)
     if fa not in _DIFFABLE or fb not in _DIFFABLE:
         raise DiffError(f"not constraint dumps (A={fa}, B={fb})")
-    if fa != fb:
+    if fa != fb and not allow_cross_format:
         raise DiffError(
             f"cannot diff across representations: A is {fa}, B is {fb}. "
             f"The M/C flip is just an encoding change — diff two {fa} steps "
@@ -338,7 +340,7 @@ def build_diff(
     cols_removed = [(n, subs_map.get(n)) for n in sorted(cols_a - cols_b)]
 
     return DiffResult(
-        fmt=fa,
+        fmt=fa if fa == fb else f"{fa}->{fb}", # show cross-format if allowed
         removed=removed,
         added=added,
         changed=changed,
