@@ -2,13 +2,16 @@
 
 Run from verifier/: uv run python m3-example.py
 Requires the Keccak 2106332 snapshots; no solver checks are performed.
+Enables the zero checker without assuming reference memory payloads are bytes.
+Use zero-check.py --reference-recv-bytes for the conditional closed example.
 """
+
 from pathlib import Path
 
 from src.lens.loader import load
-from src.verify.witness_mapping import build_mapping
-from src.verify.collapsed_witness import add_collapsed_witnesses
 from src.verify.cheap_obligations import cheap_sweep
+from src.verify.collapsed_witness import add_collapsed_witnesses
+from src.verify.witness_mapping import build_mapping
 
 
 def main():
@@ -26,11 +29,30 @@ def main():
         )
         if not mapping.total:
             raise ValueError(f"{direction}: incomplete mapping: {mapping.unresolved}")
-        goals = cheap_sweep(ref, cand, mapping)
+        goals = cheap_sweep(
+            ref,
+            cand,
+            mapping,
+            zero_check_direction=direction,
+            reference_recv_bytes=False,
+        )
         residuals = [(g.kind, g.index) for g in goals if g.status == "residual"]
         print(direction, residuals)
+        assumptions = {
+            (b["rule"], b["bus"])
+            for g in goals
+            if g.proof
+            for b in g.proof["claim"]["assumptions"]
+        }
+        for contract, row in sorted(assumptions):
+            print(
+                f"  ASSUMED {contract}: reference memory row {row} payloads are bytes"
+            )
 
-    print("Mapping and cheap checks only; residuals need proof, and IO is unchecked.")
+    print(
+        "No SMT. No receive-byte contract is assumed; remaining obligations need proof. "
+        "IO and general definition audit are unchecked."
+    )
 
 
 if __name__ == "__main__":

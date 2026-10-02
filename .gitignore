@@ -14,3 +14,4 @@ rust-cprofile-*.svg
 
 # z3 writes this when a trace is enabled
 .z3-trace
+runs/*

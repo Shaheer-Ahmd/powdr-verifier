@@ -6,76 +6,17 @@ the substituted equation has the same polynomial as a reference equation.
 All candidate equations and IO obligations still require subsequent proof.
 """
 from dataclasses import replace
-from typing import Any
 
 from ..lens.loader import machine_of
 from .witness_mapping import MappingResult, expression_columns
-
-FIELD_PRIME = 2013265921
-MAX_TERMS = 2048
-
-
-class UnsupportedPolynomial(ValueError):
-    pass
-
-
-def polynomial_key(expr: Any, substitutions=None):
-    """Bounded sparse-polynomial key over BabyBear; no division recipes.
-
-Substitution RHSs are already reference-side expressions, so they are not
-recursively substituted through candidate names again.
-"""
-    substitutions = substitutions or {}
-
-    def add(a, b, scale=1):
-        out = dict(a)
-        for term, coefficient in b.items():
-            value = (out.get(term, 0) + scale * coefficient) % FIELD_PRIME
-            if value:
-                out[term] = value
-            else:
-                out.pop(term, None)
-        if len(out) > MAX_TERMS:
-            raise UnsupportedPolynomial('Polynomial exceeds term budget')
-        return out
-
-    def multiply(a, b):
-        if len(a) * len(b) > MAX_TERMS:
-            raise UnsupportedPolynomial('Polynomial expansion exceeds budget')
-        out = {}
-        for lhs, lc in a.items():
-            for rhs, rc in b.items():
-                term = tuple(sorted(lhs + rhs))
-                out = add(out, {term: lc * rc})
-        return out
-
-    def visit(node, use_substitutions=True):
-        if type(node) is int:
-            value = node % FIELD_PRIME
-            return {(): value} if value else {}
-        if isinstance(node, str) and '@' in node:
-            if use_substitutions and node in substitutions:
-                return visit(substitutions[node], False)
-            return {(node,): 1}
-        if isinstance(node, list):
-            if len(node) == 2 and node[0] == '-':
-                return add({}, visit(node[1], use_substitutions), -1)
-            if node and len(node) % 2 == 1:
-                value = visit(node[0], use_substitutions)
-                for i in range(1, len(node), 2):
-                    rhs = visit(node[i + 1], use_substitutions)
-                    if node[i] == '+':
-                        value = add(value, rhs)
-                    elif node[i] == '-':
-                        value = add(value, rhs, -1)
-                    elif node[i] == '*':
-                        value = multiply(value, rhs)
-                    else:
-                        raise UnsupportedPolynomial('Unsupported operator')
-                return value
-        raise UnsupportedPolynomial('Not a supported polynomial expression')
-
-    return tuple(sorted(visit(expr).items()))
+# Compatibility re-exports for earlier M2 scripts. New callers import the
+# arithmetic module directly; this module only discovers witness proposals.
+from .polynomial_normalization import (
+    FIELD_PRIME as FIELD_PRIME,
+    MAX_TERMS as MAX_TERMS,
+    UnsupportedPolynomial as UnsupportedPolynomial,
+    polynomial_key as polynomial_key,
+)
 
 
 def add_collapsed_witnesses(reference, candidate, base: MappingResult):

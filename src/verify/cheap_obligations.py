@@ -9,7 +9,7 @@ from typing import Any
 
 from ..lens.diff import canon_constraint
 from .circuit_partition import partition_circuit
-from .witness_mapping import expression_columns, live_columns, MappingResult
+from .witness_mapping import expression_columns, live_columns, MappingResult, transform_expression
 
 
 @dataclass
@@ -20,24 +20,16 @@ class Obligation:
     mapped: Any
     status: str
     reason: str
+    proof: dict | None = None  # Gadget certificate/claim or polynomial-match evidence.
 
 
 def substitute_expression(expr, witnesses):
     """Simultaneous substitution: RHSs already refer to reference columns."""
-    expression_columns(expr)
-    if type(expr) is int:
-        return expr
-    if isinstance(expr, str):
-        if expr not in witnesses:
-            raise ValueError(f'Missing witness for {expr}')
-        return witnesses[expr]
-    if isinstance(expr, dict):
-        return {'QuotientOrZero': [substitute_expression(x, witnesses)
-                                   for x in expr['QuotientOrZero']]}
-    if len(expr) == 2 and expr[0] == '-':
-        return ['-', substitute_expression(expr[1], witnesses)]
-    return [substitute_expression(x, witnesses) if i % 2 == 0 else x
-            for i, x in enumerate(expr)]
+    def column(name):
+        if name not in witnesses:
+            raise ValueError(f'Missing witness for {name}')
+        return witnesses[name]
+    return transform_expression(expr, column)
 
 
 class _Keys:
@@ -52,8 +44,10 @@ class _Keys:
         if type(expr) is int or isinstance(expr, str):
             return expr
         if isinstance(expr, dict):
-            num, den = expr['QuotientOrZero']
-            recipe = ('QuotientOrZero', self.expression(num), self.expression(den))
+            if 'Constant' in expr:
+                return expr['Constant']
+            kind, args = next(iter(expr.items()))
+            recipe = (kind, *(self.expression(arg) for arg in args))
             if recipe not in self.recipes:
                 # Input column names must contain @; these internal names do
                 # not, so they cannot collide with validated input columns.
@@ -68,13 +62,24 @@ class _Keys:
                 tuple(self.expression(expr) for expr in bus['args']))
 
 
-def cheap_sweep(reference, candidate, mapping: MappingResult):
+def cheap_sweep(reference, candidate, mapping: MappingResult, *, definition_goals=(),
+                zero_check_direction=None, reference_recv_bytes=False, polynomial_matching=False):
     """Return all local obligations, including undischargeable residuals.
 
 Reference constraints are used as premises, never candidate constraints.
-Derived metadata is not automatically asserted or turned into obligations.
-Stateful interface and definition-policy handling belong to later stages.
+Derived metadata is never asserted. Explicit definition_goals supplied by the
+definition audit use the same algebraic canonical rules. Stateful IO is separate.
+Set zero_check_direction to completeness/soundness to enable the specialized
+gadget rules with this exact mapping. reference_recv_bytes explicitly grants
+the receive-byte contract; it is never enabled by default. Certificate evidence
+and any assumptions are retained in each newly discharged obligation's proof.
+polynomial_matching enables bounded reference-only matching after canonical
+checks and before gadget checks. It does not discharge definition_goals.
 """
+    if zero_check_direction not in (None, 'completeness', 'soundness'):
+        raise ValueError('Unknown zero-check direction')
+    if reference_recv_bytes and zero_check_direction is None:
+        raise ValueError('Receive-byte contract requires zero_check_direction')
     if not mapping.total:
         raise ValueError('Cannot sweep with an incomplete mapping')
     if mapping.reference_columns != live_columns(reference) or mapping.candidate_columns != live_columns(candidate):
@@ -115,4 +120,23 @@ Stateful interface and definition-policy handling belong to later stages.
         mapped['args'] = [substitute_expression(expr, mapping.witnesses) for expr in bus['args']]
         add('stateless', item.index, bus, mapped, keys.bus(mapped),
             keys.expression(mapped['mult']) == ('c', 0))
+    for index, original, mapped in definition_goals:
+        if not expression_columns(mapped) <= mapping.reference_columns:
+            raise ValueError('Definition obligation mentions non-reference columns')
+        key = keys.expression(mapped)
+        same_sides = (isinstance(mapped, list) and len(mapped) == 3 and mapped[1] == '-'
+                      and keys.expression(mapped[0]) == keys.expression(mapped[2]))
+        add('derived-definition', index, original, mapped,
+            ('algebraic', key), key == ('c', 0) or same_sides)
+    if polynomial_matching:
+        from .polynomial_matching import discharge_polynomial_matches
+        obligations = discharge_polynomial_matches(reference, mapping, obligations)
+    if zero_check_direction is not None:
+        # Lazy import avoids a cycle: zero_check also offers an M2/M3 wrapper.
+        from .zero_check import discharge_zero_checks
+        before, after = ((reference, candidate) if zero_check_direction == 'completeness'
+                         else (candidate, reference))
+        obligations, _evidence = discharge_zero_checks(
+            before, after, mapping, zero_check_direction, obligations,
+            allow_recv_bytes=reference_recv_bytes)
     return obligations
