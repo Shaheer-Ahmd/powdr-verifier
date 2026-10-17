@@ -4,7 +4,8 @@ Sources, in priority order:
   1. same name     - the column exists on the reference side: maps to itself
   2. derived       - the candidate's own ``derived_columns`` recipe
   3. substitution  - ``_substitutions.json``, composed down to reference columns
-  4. witness       - soundness only: one shared witness found by search
+  4. witness       - soundness only: read off a merged constraint, or one shared
+                     term found by search
 
 Any mapping is sound: a poor choice can only make an obligation unprovable,
 never prove a wrong pass (``flip_quant``). So the heuristics here are free to
@@ -15,7 +16,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from src.polysolver import Expr, Opaque, PolySolver, find_uniform_witness, variables
+from src.polysolver import (
+    Expr,
+    Opaque,
+    PolySolver,
+    find_uniform_witness,
+    find_witness,
+    variables,
+)
 
 from .circuit import (
     Circuit,
@@ -42,7 +50,7 @@ class Mapping:
     unmapped: set[str] = field(default_factory=set)
     # Why each unmapped column is unmapped: "witness search failed" or "lookup-only".
     unmapped_reason: dict[str, str] = field(default_factory=dict)
-    # Each uniform witness found: (the columns it covers, the shared term).
+    # Each witness found: (the columns that share it, the term).
     witnesses: list[tuple[list[str], Expr]] = field(default_factory=list)
     # Extra definitions of a derived column beyond the first: (column, rhs) to check.
     extra: list[tuple[str, Expr | Opaque]] = field(default_factory=list)
@@ -95,20 +103,30 @@ def soundness_mapping(
             m.unmapped_reason[col] = "lookup-only"
     left = [col for col in left if col in in_constraints]
     # What is left was merged away with no hint (e.g. the is-zero inverse
-    # markers). Search for one After column that works for a whole group.
+    # markers). Each group of such columns gets its own witness.
     for group in _groups(left, before.constraints):
         targets = [c for c in before.constraints if variables(c) & group]
-        shortlist = _shortlist(after, before, targets)
-        r = find_uniform_witness(solver, m.defs, group, targets, shortlist)
-        if r is None:
+        shortlist = _shortlist(after, before, targets)  # After-only columns, e.g. free_var
+        # First: read inv_i := f or f * x_i off After's f * (x_1' + ... + x_n') + c.
+        w = find_witness(solver, m.defs, group, targets, shortlist)
+        # if w is None: # we don't need the fallback - `find_witness` covers `find_uniform_witness``
+        #     # Fallback: one After column for all of them (e.g. a renamed column).
+        #     r = find_uniform_witness(solver, m.defs, group, targets, shortlist)
+        #     w = None if r is None else dict.fromkeys(group, r)
+        if w is None:
             m.unmapped |= group  # reported, never guessed
             for col in group:
                 m.unmapped_reason[col] = "witness search failed"
             continue
+        m.defs.update(w)
         for col in group:
-            m.defs[col] = r
             m.source[col] = "witness"
-        m.witnesses.append((sorted(group), r))
+        # Report one entry per distinct term: in the linear case all inv_i share
+        # f (one entry), in the squared case each has its own f * x_i.
+        shared: dict[str, tuple[list[str], Expr]] = {}  # repr(term) -> (columns, term)
+        for col in sorted(group):
+            shared.setdefault(repr(w[col]), ([], w[col]))[0].append(col)
+        m.witnesses += shared.values()
     return m
 
 

@@ -415,7 +415,7 @@ def _mapping(steps: list[dict]) -> Table | None:
     t.add_column("Where", style="dim")
     cols = sum(len(c) for s in wit for c, _ in s["witnesses"])
     t.add_row(
-        Text("uniform witness found", style="green"),
+        Text("witness found", style="green"),
         str(len(wit)),
         str(cols),
         _where(wit),

@@ -49,3 +49,17 @@ def product_factors(e: Expr) -> list[Expr]:
     if isinstance(e, list) and len(e) == 3 and e[1] == "*":
         return product_factors(e[0]) + product_factors(e[2])
     return [e]
+
+
+def sum_terms(e: Expr, sign: int = 1) -> list[tuple[int, Expr]]:
+    """The operands of the top-level ``+``/``-`` chain, each with its sign (1 or -1).
+
+    E.g. (a - b) + c  ->  [(1, a), (-1, b), (1, c)]. Products are not opened:
+    (a - b) * (a - b) is one operand.
+    """
+    if isinstance(e, list) and len(e) == 3 and e[1] in ("+", "-"):
+        right = sign if e[1] == "+" else -sign  # "x - y" flips the sign of y
+        return sum_terms(e[0], sign) + sum_terms(e[2], right)
+    if isinstance(e, list) and len(e) == 2:  # ["-", x]
+        return sum_terms(e[1], -sign)
+    return [(sign, e)]

@@ -68,6 +68,26 @@ def test_completeness_uses_substitutions():
     assert r.verified
 
 
+@pytest.mark.parametrize("block", ["2103472", "2100224"])
+def test_squared_is_zero_soundness(block):
+    # rule_based 047 -> 048: f * sum of x_i' - cmp, with some x_i squared.
+    (snd,) = check("keccak", block, "047", "048", ("soundness",))
+    assert snd.verified and not snd.mapping.unmapped
+    assert len(_by_rung(snd, "normalize")) == 1  # the gadget sum, via the witness
+    markers = [c for c, s in snd.mapping.source.items() if s == "witness"]
+    assert len(markers) == 4
+
+
+def test_mixed_is_zero_witness():
+    # 2100224 compares with a constant; its top byte is compared with 0, so
+    # powdr did not square it: inv_3 := f, the others f * (a_i - const).
+    (snd,) = check("keccak", "2100224", "047", "048", ("soundness",))
+    f = "free_var_27529@27529"
+    assert snd.mapping.defs["diff_inv_marker__3_676@27520"] == f
+    others = [snd.mapping.defs[f"diff_inv_marker__{i}_676@{27517 + i}"] for i in range(3)]
+    assert all(w[0] == f and w[1] == "*" for w in others)
+
+
 def test_soundness_opposite_polarity_is_normalized():
     _, snd = check("keccak", "2099556", "008", "009")
     assert snd.mapping.witnesses and snd.verified
