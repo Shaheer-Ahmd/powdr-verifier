@@ -89,7 +89,7 @@ def test_c_break_the_witness(dumps):
 
     cmp, snd = run(dumps, after_edit=edit)
     assert not snd.verified
-    assert snd.mapping.unmapped == MARKERS  # no uniform witness exists now
+    assert snd.mapping.unmapped == MARKERS  # no witness exists now
     assert undecided(snd) == {"c13"}  # the gadget sum, which mentions them
     # Completeness cannot see this edit: f is opaque, so c15 was undecided anyway.
     assert undecided(cmp) == {"c14", "c15"}

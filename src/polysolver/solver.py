@@ -325,15 +325,22 @@ class PolySolver:
         """Is ``a = b`` implied, as values in F_p? The same question as implies(a - b)."""
         return self.implies([a, "-", b], defs)
 
-    def normal_form(self, e: Expr, defs: Defs = NO_DEFS) -> tuple | None:
+    def normal_form(
+        self, e: Expr, defs: Defs = NO_DEFS, free: Iterable[str] = ()
+    ) -> tuple | None:
         """``e`` expanded under the Defs and the solved equations, as a hashable value.
 
         For proposing candidates only (e.g. an index of lookups): two expressions
         with the same normal form are equal, but a caller that relies on it must
         still ask implies or implies_equal, so that every verdict comes from the
-        rules. None if ``e`` mentions an opaque or unknown variable, or is too big.
+        rules. Names in ``free`` stay plain variables (e.g. the unknowns of a
+        witness search). None if ``e`` mentions an opaque or unknown variable,
+        or is too big.
         """
+        free = set(free)
         for n in variables(e):
+            if n in free:
+                continue  # no value of its own: expands to itself
             try:
                 v = self._var(n)
             except UndefinedVariable:
@@ -344,6 +351,14 @@ class PolySolver:
             return tuple(sorted(P.expand(e, self._expander(defs), self.p, self.max_terms).items()))
         except P.ExpansionLimit:
             return None
+
+    def premises_mentioning(self, name: str) -> list[Expr]:
+        """The premises, as written, that mention the variable ``name``.
+
+        For a caller that looks for a shape in the written form (e.g. the
+        witness search reading f * (x_1' + ... + x_n') + c); not expanded.
+        """
+        return [self._premises[i].expr for i in self._by_var.get(self._var(name), [])]
 
     def _expander(self, defs: Defs):
         """Expansion lookup: Defs (reduced on use), then the solved equations."""
