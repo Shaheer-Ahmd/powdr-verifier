@@ -142,6 +142,47 @@ def test_rule_s_rejects_a_sum_of_squares():
     assert s._premises[0].sums == []  # expanded, found nonlinear, not a sum
 
 
+def _weighted(order, premise, hi=255):
+    t = VarTable()
+    for n in order:  # interning order decides which term the zero key makes monic
+        t.var(n)
+    s = PolySolver(t, declared=order)
+    s.add_premise(premise, tag="p")
+    for n in order:
+        s.add_range(n, 0, hi, f"r_{n}")
+    return s
+
+
+def test_rule_s_weighted_sum_in_any_variable_order():
+    # 2a + 3b = 0 with bytes: at most 1275 < p, so a = b = 0. Made monic it is
+    # a + (3/2)b or (2/3)a + b, and 3/2, 2/3 are huge in F_p.
+    for order in (["a", "b"], ["b", "a"]):
+        s = _weighted(order, add(mul(2, "a"), mul(3, "b")))
+        assert s.implies("a").rule == "nowrap-split"
+        assert s.implies("b").rule == "nowrap-split"
+
+
+def test_rule_s_negated_weighted_sum():
+    # -2a - 3b = 0, written with p - 2 and p - 3: its negation is the small sum.
+    s = _weighted(["a", "b"], add(mul(P - 2, "a"), mul(P - 3, "b")))
+    assert s.implies("a").rule == "nowrap-split"
+
+
+def test_rule_s_weighted_bound_edge():
+    edge = (P - 1) // 5  # 2*edge + 3*edge < p, one more and it is not
+    s2a3b = add(mul(2, "a"), mul(3, "b"))
+    assert _weighted(["a", "b"], s2a3b, edge).implies("a").rule == "nowrap-split"
+    v = _weighted(["a", "b"], s2a3b, edge + 1).implies("a")
+    assert isinstance(v, Unknown) and v.kind == "nowrap-bound"
+
+
+def test_rule_s_no_scaling_rescues_mixed_signs():
+    # 2a - 3b = 0 holds for the bytes a = 3, b = 2: splitting it would be unsound.
+    for order in (["a", "b"], ["b", "a"]):
+        v = _weighted(order, add(mul(2, "a"), mul(P - 3, "b"))).implies("a")
+        assert isinstance(v, Unknown) and v.kind == "nowrap-bound"
+
+
 def test_rule_s_split_is_lazy_and_cached():
     s = PolySolver(VarTable(), declared=AFTER_GIVEN)
     for i, e in enumerate(AFTER):

@@ -534,15 +534,21 @@ class PolySolver:
 
     def _no_wrap(self, s: P.Poly) -> tuple[str, str] | None:
         """(kind, message) saying why the sum ``s`` might wrap past p, or None."""
-        # Scale monic first: a unit multiple of s has the same zeros.
-        s = dict(P.zkey(s, self.p))
         # Every summand needs an upper bound, or the sum could be anything.
         missing = [self.table.name(v) for ((v, _),) in s if v not in self._ranges]
         if missing:
             return "nowrap-missing-range", f"no range for {', '.join(sorted(missing))}"
         # With 0 <= a_i <= hi_i the integer sum is at most sum c_i * hi_i. If that
         # stays below p, "sum = 0 mod p" means the integer sum is 0, so each a_i = 0.
-        bound = sum(c * self._ranges[v][1] for ((v, _),), c in s.items())
+        # Any unit multiple k*s has the same zeros, so one k whose bound fits is
+        # enough. Making s monic alone can hide a small sum: 2a + 3b becomes
+        # a + (3/2)b, and 3/2 is huge in F_p. So try s as written, -s, and s made
+        # monic in each of its terms, and keep the smallest bound.
+        scales = {1, self.p - 1} | {pow(c, self.p - 2, self.p) for c in s.values()}
+        bound = min(
+            sum(c * k % self.p * self._ranges[v][1] for ((v, _),), c in s.items())
+            for k in scales
+        )
         if bound >= self.p:
             return "nowrap-bound", f"sum of c_i * hi_i is {bound} >= p"
         return None
