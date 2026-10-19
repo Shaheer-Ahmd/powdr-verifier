@@ -13,6 +13,7 @@ def reference_solver(
     use_ranges: bool = True,
     hints: list[tuple[str, Expr]] = (),
     constants: bool = False,
+    one_hot: bool = True,
 ) -> PolySolver:
     """Premises and ranges from the reference side only (the polarity rule).
 
@@ -21,9 +22,9 @@ def reference_solver(
     follow from what it already knows; a rejected hint costs completeness only.
     With ``constants``, the solver then also solves every premise that pins a
     variable to a constant (after the hints, so the two do not compete for a
-    column).
+    column). ``one_hot`` turns PolySolver's rule O on or off.
     """
-    s = PolySolver(table, declared=ref.columns)
+    s = PolySolver(table, declared=ref.columns, one_hot=one_hot)
     for i, c in enumerate(ref.constraints):
         s.add_premise(c, tag=f"{ref.label}:c{i}")
     if use_ranges:

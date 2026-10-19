@@ -41,6 +41,11 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="do not solve premises that pin a variable to a constant",
     )
+    c.add_argument(
+        "--no-one-hot",
+        action="store_true",
+        help="leave out PolySolver's rule O (one-hot flags)",
+    )
     c.add_argument("--root", type=Path, help="dump root (default: powdr-dumps)")
     c.add_argument("--json", action="store_true", help="machine-readable output")
     c.add_argument("-v", "--verbose", action="store_true", help="list every obligation")
@@ -59,6 +64,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-constants",
         action="store_true",
         help="do not solve premises that pin a variable to a constant",
+    )
+    s.add_argument(
+        "--no-one-hot",
+        action="store_true",
+        help="leave out PolySolver's rule O (one-hot flags)",
     )
     s.add_argument("--root", type=Path, help="dump root (default: powdr-dumps)")
     s.add_argument("--save", type=Path, help="also write the results as JSON")
@@ -162,6 +172,7 @@ def _sweep(args, directions) -> int:
             on_block=progress,
             use_hints=not args.no_hints,
             use_constants=not args.no_constants,
+            use_one_hot=not args.no_one_hot,
         )
     if args.save:
         args.save.write_text(json.dumps(data))
@@ -199,6 +210,7 @@ def main(argv: list[str] | None = None) -> int:
             args.root,
             not args.no_hints,
             not args.no_constants,
+            not args.no_one_hot,
         )
     except (ResolveError, FileNotFoundError, MissingDefinition) as exc:
         print(f"redesign: {type(exc).__name__}: {exc}", file=sys.stderr)

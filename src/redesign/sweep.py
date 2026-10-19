@@ -5,7 +5,7 @@ reference side's constraints and byte ranges. The rungs, cheapest first:
 
   trivial    - c[w] is identically zero (canonical key is empty)
   identical  - c[w] has the same canonical key as a reference constraint
-  normalize / nowrap-split - PolySolver proves it
+  normalize / nowrap-split / one-hot - PolySolver proves it (rules N, S, O)
   undecided  - nothing applied; left for the SMT rungs (not built yet)
 
 A stateless bus interaction (a lookup) is the fact "mult != 0 => args in
@@ -59,6 +59,7 @@ DISCHARGED = (
     "identical",
     "normalize",
     "nowrap-split",
+    "one-hot",
     "evaluated",
     "congruence",
 )

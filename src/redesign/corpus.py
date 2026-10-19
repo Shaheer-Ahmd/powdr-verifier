@@ -35,6 +35,7 @@ def run_sweep(
     on_block: Callable[[str, list[dict]], None] | None = None,
     use_hints: bool = True,
     use_constants: bool = True,
+    use_one_hot: bool = True,
 ) -> dict:
     """Sweep the blocks (default: all) and return ``{"meta": ..., "steps": [...]}``."""
     directory = group_dir(group, root or POWDR_DUMPS_DIR)
@@ -66,6 +67,7 @@ def run_sweep(
                     use_ranges,
                     use_hints,
                     use_constants,
+                    use_one_hot,
                 )
             except MissingDefinition as exc:
                 # Only completeness raises; still record soundness separately.
@@ -79,6 +81,7 @@ def run_sweep(
                         use_ranges,
                         use_hints,
                         use_constants,
+                        use_one_hot,
                     )
                     records.append(_record(base, r))
                 continue
@@ -94,6 +97,7 @@ def run_sweep(
         "byte_ranges": use_ranges,
         "hints": use_hints,
         "constants": use_constants,
+        "one_hot": use_one_hot,
         "seconds": round(time.monotonic() - start, 1),
         "created": datetime.now().astimezone().isoformat(timespec="seconds"),
         "verifier_commit": _commit(),

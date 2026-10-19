@@ -24,6 +24,9 @@ Rules, cheapest first:
 - N (normalize): q has the same zero key as one premise.
 - S (no-wrap split): a premise G * (c1*a1 + ... + cn*an) with ranged a_i whose
   weighted sum cannot wrap past p implies G * a_j = 0 for every j.
+- O (one-hot): q says a flag f is 0 or 1, where premises make f one of a
+  group of booleans that sum to 0 or 1, and linear premises over the group
+  (selectors) leave only some flags able to be the one that is on.
 
 The solver knows nothing about circuits: only variables, polynomials,
 ranges and definitions.
@@ -49,7 +52,7 @@ class UndefinedVariable(LookupError):
 
 @dataclass(frozen=True)
 class Implied:
-    rule: str  # "trivial" | "normalize" | "nowrap-split"
+    rule: str  # "trivial" | "normalize" | "nowrap-split" | "one-hot"
     premises: tuple[str, ...] = ()  # tags of the premises used
     ranges: tuple[str, ...] = ()  # variables whose ranges were used
     defs: tuple[str, ...] = ()  # defined variables that occur in q
@@ -96,10 +99,15 @@ class PolySolver:
         declared: Iterable[str],
         p: int = BABYBEAR,
         max_terms: int = P.MAX_TERMS,
+        one_hot: bool = True,
     ):
         self.table = table
         self.p = p
         self.max_terms = max_terms
+        # The rules _decide tries, cheapest first; rule O can be left out.
+        self._rules = [self._rule_n, self._rule_s]
+        if one_hot:
+            self._rules.append(self._rule_o)
         self.declared: frozenset[Var] = frozenset(table.var(n) for n in declared)
         self._premises: list[_Premise] = []
         # Premise index for rule N: variable -> ids of the premises that mention it.
@@ -372,7 +380,7 @@ class PolySolver:
     def _decide(self, k: P.Key) -> Verdict:
         """Try the rules in order, cheapest first; the first Implied wins."""
         declined = []
-        for rule in (self._rule_n, self._rule_s):
+        for rule in self._rules:
             v = rule(k)
             if isinstance(v, Implied):
                 return v
@@ -552,6 +560,101 @@ class PolySolver:
         if bound >= self.p:
             return "nowrap-bound", f"sum of c_i * hi_i is {bound} >= p"
         return None
+
+    # ------------------------------------------------------------ rule O
+
+    def _rule_o(self, k: P.Key) -> Verdict:
+        """Rule O: q is f - v with v in {0, 1}, and f is in a one-hot group.
+
+        A group is a premise x_1 + ... + x_n - c with c in {0, 1}, f among the
+        x_i, and a premise x^2 - x for every member. Each x_i is then 0 or 1
+        (F_p has no zero divisors), and as n < p the sum is c as an integer:
+        no flag is on (c = 0), or exactly one is (c = 1). In the second case a
+        selector, a linear premise w_0 + sum w_x * x over members only, comes
+        to w_0 + w_j for the flag j that is on, so w_j = -w_0. Call the flags
+        whose weights pass every selector live; j is one of them. So f = 0 if
+        f is not live, and f = 1 if f is the only live flag.
+
+        Scaling a premise scales its weights and w_0 alike, so the monic keys
+        can be compared as they are. If no flag is live, the premises
+        contradict each other; that is reported, not used.
+        """
+        lin = self._linear(k)
+        if lin is None or len(lin[0]) != 1:
+            return Unknown("O: not x = 0 or x = 1")
+        (f,) = lin[0]  # monic, so f's coefficient is 1
+        value = -lin[1] % self.p
+        if value not in (0, 1):
+            return Unknown("O: not x = 0 or x = 1")
+        notes = []
+        for i in self._mentioning(f):
+            group = self._linear(self._premise_key(i))
+            if group is None or f not in group[0] or len(group[0]) < 2:
+                continue
+            members, c = group
+            if set(members.values()) != {1} or c not in (0, self.p - 1):
+                continue
+            tag = self._premises[i].tag
+            flags = sorted(members)
+            bools = [self._boolean_premise(x) for x in flags]
+            if None in bools:
+                n = self.table.name(flags[bools.index(None)])
+                notes.append(f"{tag}: no {n}^2 - {n} premise")
+                continue
+            if c == 0:  # no flag is on
+                if value == 0:
+                    return self._one_hot([i, *bools])
+                continue
+            live, selectors = set(members), []
+            # A flag with weight 0 does not occur in a selector, so look
+            # through the premises of every member, not only those of f.
+            for j in sorted({j for x in flags for j in self._mentioning(x)} - {i}):
+                sel = self._linear(self._premise_key(j))
+                if sel is None or not sel[0].keys() <= members.keys():
+                    continue
+                w, w0 = sel
+                kept = {x for x in live if w.get(x, 0) == -w0 % self.p}
+                if kept != live:
+                    live = kept
+                    selectors.append(j)
+            if not live:
+                notes.append(f"{tag}: the selectors contradict each other")
+            elif (value == 0 and f not in live) or (value == 1 and live == {f}):
+                return self._one_hot([i, *selectors, *bools])
+            else:
+                names = ", ".join(sorted(self.table.name(x) for x in live))
+                notes.append(f"{tag}: could be on: {names}")
+        return Unknown("O: " + ("; ".join(notes) if notes else "no flag group"))
+
+    @staticmethod
+    def _linear(k: P.Key | None) -> tuple[dict[Var, int], int] | None:
+        """({x: c_x}, c_0) if the key is c_0 + sum c_x * x, else None."""
+        if not k:
+            return None
+        coeffs, c0 = {}, 0
+        for m, c in k:
+            if m == ():
+                c0 = c
+            elif len(m) == 1 and m[0][1] == 1:
+                coeffs[m[0][0]] = c
+            else:
+                return None
+        return coeffs, c0
+
+    def _boolean_premise(self, x: Var) -> int | None:
+        """A premise that reduces to x^2 - x, so that x is 0 or 1; None if none does."""
+        want = ((((x, 2),), 1), (((x, 1),), self.p - 1))
+        return next(
+            (i for i in self._mentioning(x) if self._premise_key(i) == want), None
+        )
+
+    def _one_hot(self, used: list[int]) -> Implied:
+        """Rule O's verdict: the group, the selectors and the x^2 - x premises used."""
+        prems = [self._premises[i] for i in used]
+        solved = {t for prem in prems for t in self._solved_tags_of(prem.expr)}
+        return Implied(
+            "one-hot", tuple(prem.tag for prem in prems), solved=tuple(sorted(solved))
+        )
 
     # ------------------------------------------------------------ helpers
 

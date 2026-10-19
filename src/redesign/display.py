@@ -54,12 +54,19 @@ DISCHARGED_ROWS = [
         "split of a reference sum constraint, using byte ranges",
     ),
     ("nowrap-split", "via mapping", "same, after substituting mapped columns"),
+    (
+        "one-hot",
+        "direct",
+        "a flag is 0 or 1: boolean flags summing to 1, and selectors",
+    ),
+    ("one-hot", "via mapping", "same, after substituting mapped columns"),
 ]
 RUNG_NOTE = {
     "trivial": "rung 1",
     "identical": "rung 2, lens canon_zero",
     "normalize": "PolySolver rule N",
     "nowrap-split": "PolySolver rule S",
+    "one-hot": "PolySolver rule O",
 }
 # The same for stateless bus interactions.
 BUS_ROWS = [

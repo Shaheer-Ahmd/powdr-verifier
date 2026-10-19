@@ -68,6 +68,22 @@ def test_completeness_uses_substitutions():
     assert r.verified
 
 
+@pytest.mark.parametrize(
+    "one_hot, hints, undecided",
+    [(True, (6339, 4564), 282), (False, (4285, 6618), 1150)],
+    ids=["rule O", "no rule O"],
+)
+def test_opcode_flag_hints_by_rule_o(one_hot, hints, undecided):
+    # solver pass: an opcode flag hint follows only from booleanity, the sum
+    # of the flags and the opcode selector together (rule O). The flags then
+    # ungate the timestamp checks. With rule O, what stays undecided is in the
+    # shift chip.
+    (cmp,) = check("keccak", "2100224", "002", "003", ("completeness",),
+                   use_one_hot=one_hot)
+    assert (cmp.hints_accepted, cmp.hints_rejected) == hints
+    assert cmp.counts("constraint")["undecided"] == undecided
+
+
 def test_soundness_opposite_polarity_is_normalized():
     _, snd = check("keccak", "2099556", "008", "009")
     assert snd.mapping.witnesses and snd.verified
