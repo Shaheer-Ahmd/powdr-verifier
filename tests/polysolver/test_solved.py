@@ -48,6 +48,15 @@ def test_unimplied_equation_is_rejected_and_changes_nothing():
     assert s.implies(sub(mul("a", "y"), "c")).rule == "normalize"
 
 
+def test_every_verdict_is_logged():
+    s = solver({"x", "a", "b"}, [sub("x", "a")])
+    no = s.add_solved("x", "b", tag="h:x")
+    ok = s.add_solved("x", "a", tag="h:x")
+    s.solve_constants()  # nothing to pin, so nothing more is logged
+    assert s.solved_log == [("h:x", no), ("h:x", ok)]
+    assert isinstance(no, Unknown) and isinstance(ok, Implied)
+
+
 def test_value_must_not_mention_x():
     s = solver({"x", "a"}, [sub("x", add("x", "a"))])
     v = s.add_solved("x", add("x", "a"), tag="h")

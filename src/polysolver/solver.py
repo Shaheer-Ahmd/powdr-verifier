@@ -147,6 +147,7 @@ class PolySolver:
         self.solved_rejected = 0  # add_solved calls whose check failed
         self.constants_solved = 0  # equations added by solve_constants
         self.pinned = 0  # variables replaced because their range collapsed
+        self.solved_log: list[tuple[str, Verdict]] = []  # (tag, verdict) per add_solved call
 
     # ------------------------------------------------------------ inputs
 
@@ -182,8 +183,13 @@ class PolySolver:
         queries. On Unknown nothing changes: the equation is rejected, which
         costs completeness only. If x is already solved (e.g. pinned by
         solve_one_hot), the query compares its value with t, and an Implied
-        verdict also changes nothing.
+        verdict also changes nothing. Every verdict goes into ``solved_log``.
         """
+        verdict = self._add_solved(x, t, tag)
+        self.solved_log.append((tag, verdict))
+        return verdict
+
+    def _add_solved(self, x: str, t: Expr, tag: str) -> Verdict:
         (xv,) = self._declared_vars(x, "solved variable")
         self._declared_vars(t, "solved value")
         try:

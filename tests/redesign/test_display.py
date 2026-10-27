@@ -62,7 +62,8 @@ def test_cli_sweep_save_then_report(tmp_path, capsys):
     from src.redesign.cli import main
 
     out = tmp_path / "sweep.json"
-    main(["sweep", "keccak", "2106332", "--save", str(out), "--no-legend"])
+    db = str(tmp_path / "sweeps.db")  # never the real reports/sweeps.db
+    main(["sweep", "keccak", "2106332", "--save", str(out), "--no-legend", "--db", db])
     swept = capsys.readouterr().out
     assert main(["report", str(out), "--no-legend"]) == 0
     reported = capsys.readouterr().out

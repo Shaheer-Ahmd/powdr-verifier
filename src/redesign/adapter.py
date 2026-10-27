@@ -6,6 +6,8 @@ from src.polysolver import Expr, PolySolver, VarTable
 
 from .circuit import Circuit, byte_ranges
 
+HINT_TAG = "hint:"  # tag prefix of powdr's substitutions, in verdicts and solved_log
+
 
 def reference_solver(
     table: VarTable,
@@ -35,7 +37,7 @@ def reference_solver(
     if one_hot:
         s.solve_one_hot()
     for x, t in hints:
-        s.add_solved(x, t, tag=f"hint:{x}")
+        s.add_solved(x, t, tag=f"{HINT_TAG}{x}")
     if constants:
         s.solve_constants()
     return s

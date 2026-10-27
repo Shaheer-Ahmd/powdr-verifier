@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 from src.lens.loader import load, machine_of
-from src.lens.resolve import group_dir, index_block, list_blocks
+from src.lens.resolve import ResolveError, group_dir, index_block, list_blocks
 from src.paths import POWDR_DUMPS_DIR, VERIFIER_DIR
 
 from .check import DIRECTIONS, check_step
@@ -36,18 +36,33 @@ def run_sweep(
     use_hints: bool = True,
     use_constants: bool = True,
     use_one_hot: bool = True,
+    passes: Iterable[str] = (),
+    on_pair: Callable[[list[dict], list[Report | None], Circuit, Circuit], None]
+    | None = None,
 ) -> dict:
-    """Sweep the blocks (default: all) and return ``{"meta": ..., "steps": [...]}``."""
+    """Sweep the blocks (default: all) and return ``{"meta": ..., "steps": [...]}``.
+
+    ``passes`` keeps only the step pairs whose After dump comes from one of
+    these passes ("final" for the last dump). ``on_pair`` gets each pair's
+    records, the reports behind them (None for a mapping error) and the two
+    circuits.
+    """
     directory = group_dir(group, root or POWDR_DUMPS_DIR)
     blocks = list(blocks) or list_blocks(directory)
+    passes = set(passes)
     start = time.monotonic()
+    indexed = {block: index_block(directory, block) for block in blocks}
+    if passes:
+        seen = {e.pass_name or "final" for es in indexed.values() for e in es[1:]}
+        if passes - seen:
+            missing = ", ".join(sorted(passes - seen))
+            raise ResolveError(
+                f"no step from pass {missing} (have: {', '.join(sorted(seen))})"
+            )
     steps: list[dict] = []
-    for block in blocks:
-        entries = index_block(directory, block)
+    for block, entries in indexed.items():
         subs = load_substitutions(group, block, root)
-        circuits = [
-            Circuit.from_machine(e.label, machine_of(load(e.path))) for e in entries
-        ]
+        circuits: dict[int, Circuit] = {}  # loaded on first use
         records = []
         for i in range(len(entries) - 1):
             e0, e1 = entries[i], entries[i + 1]
@@ -58,10 +73,17 @@ def run_sweep(
                 "after": e1.label,
                 "pass": e1.pass_name or "final",
             }
+            if passes and base["pass"] not in passes:
+                continue
+            for j in (i, i + 1):
+                if j not in circuits:
+                    e = entries[j]
+                    circuits[j] = Circuit.from_machine(e.label, machine_of(load(e.path)))
+            before, after = circuits[i], circuits[i + 1]
             try:
                 reports = check_step(
-                    circuits[i],
-                    circuits[i + 1],
+                    before,
+                    after,
                     subs,
                     directions,
                     use_ranges,
@@ -71,11 +93,11 @@ def run_sweep(
                 )
             except MissingDefinition as exc:
                 # Only completeness raises; still record soundness separately.
-                records.append(_error(base, "completeness", str(exc)))
+                reports = [None]
                 if "soundness" in directions:
-                    (r,) = check_step(
-                        circuits[i],
-                        circuits[i + 1],
+                    reports += check_step(
+                        before,
+                        after,
                         subs,
                         ("soundness",),
                         use_ranges,
@@ -83,9 +105,13 @@ def run_sweep(
                         use_constants,
                         use_one_hot,
                     )
-                    records.append(_record(base, r))
-                continue
-            records += [_record(base, r) for r in reports]
+                pair = [_error(base, "completeness", str(exc))]
+                pair += [_record(base, r) for r in reports[1:]]
+            else:
+                pair = [_record(base, r) for r in reports]
+            records += pair
+            if on_pair:
+                on_pair(pair, reports, before, after)
         steps += records
         if on_block:
             on_block(block, records)
@@ -93,6 +119,7 @@ def run_sweep(
         "format": FORMAT,
         "group": group,
         "blocks": len(blocks),
+        "passes": sorted(passes),
         "directions": list(directions),
         "byte_ranges": use_ranges,
         "hints": use_hints,

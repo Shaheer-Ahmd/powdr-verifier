@@ -47,6 +47,7 @@ from src.polysolver import (
     variables,
 )
 
+from .adapter import HINT_TAG
 from .circuit import Circuit, interaction_columns, substitute, substitute_interaction
 from .mapping import Mapping
 from .tables import is_row
@@ -79,6 +80,9 @@ class Obligation:
     # True if c mentions a column defined by the mapping, so c[w] differs from c.
     via_mapping: bool = False
     kind: str = "constraint"  # or "bus" for a stateless bus interaction
+    # Canonical key of c[w] (or I[w]); None if an opaque or unmapped column
+    # kept the canonical rungs from writing it out. For grouping in reports.
+    key: tuple | None = field(default=None, compare=False, repr=False)
 
 
 # Why an obligation can stay undecided. Fixed strings, so reports can group them.
@@ -126,6 +130,8 @@ class Report:
     hints_rejected: int = 0  # hints whose check failed (not used)
     constants_solved: int = 0  # premises that pinned a variable (solve_constants)
     pinned: int = 0  # variables pinned by collapsed ranges (solve_one_hot)
+    # powdr's hints, in the order tried: (column, accepted, rule or reject kind, note).
+    hints: list[tuple[str, bool, str, str]] = field(default_factory=list)
 
     @property
     def verified(self) -> bool:
@@ -202,7 +208,9 @@ def sweep(
         try:
             v = solver.implies(c, defs)
         except UndefinedVariable as exc:
-            return Obligation(name, "undecided", str(exc), reason="mapping gap")
+            return Obligation(
+                name, "undecided", str(exc), reason="mapping gap", key=key
+            )
         if isinstance(v, Implied):
             detail = ", ".join(
                 v.premises
@@ -285,6 +293,7 @@ def sweep(
                     via_mapping=mapped,
                     kind="bus",
                 )
+        ob = replace(ob, key=key)
         bus_cache[key] = ob
         return ob
 
@@ -299,6 +308,16 @@ def sweep(
     report.pinned = solver.pinned
     report.hints_accepted = solver.solved_accepted - solver.constants_solved
     report.hints_rejected = solver.solved_rejected
+    report.hints = [
+        (
+            tag.removeprefix(HINT_TAG),
+            isinstance(v, Implied),
+            v.rule if isinstance(v, Implied) else v.kind,
+            "" if isinstance(v, Implied) else v.note,
+        )
+        for tag, v in solver.solved_log
+        if tag.startswith(HINT_TAG)
+    ]
     return report
 
 
@@ -430,6 +449,7 @@ def _key(e: Expr):
 
 def _remember(cache: dict, key, ob: Obligation) -> Obligation:
     """Cache a verdict under its key (when there is one) and return it."""
+    ob = replace(ob, key=key)
     if key is not None:
         cache[key] = ob
     return ob
