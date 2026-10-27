@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -103,6 +104,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="one run: by pass and step; narrow with the filters",
         description="Without filters: every pass, then the steps with most undecided"
         " obligations. --pass/--block: reasons, shapes, hints and steps there."
+        " --pair: the same for one step of every block (with --block: one step)."
         " --reason/--shape: the obligations themselves. --hints: hint verdicts."
         " --vs BASE: what changed since BASE.",
     )
@@ -111,6 +113,9 @@ def _build_parser() -> argparse.ArgumentParser:
     show.add_argument("--direction", choices=DIRECTIONS)
     show.add_argument("--kind", choices=("constraint", "bus"))
     show.add_argument("--block")
+    show.add_argument(
+        "--pair", type=_pair, metavar="FROM->TO", help="one step, e.g. 002->003 (or 2->3)"
+    )
     show.add_argument("--reason", help="undecided reason, or a prefix of one")
     show.add_argument("--shape", help="shape id (from the shapes table), or a prefix")
     show.add_argument("--hints", action="store_true", help="rejected hints, by kind and family")
@@ -134,6 +139,14 @@ def _add_display_args(p: argparse.ArgumentParser) -> None:
         metavar="N",
         help="show N example undecided obligations per reason",
     )
+
+
+def _pair(text: str) -> str:
+    """'2->3', '002->003' or '2 3' as the sweep writes it: '002->003'."""
+    nums = re.findall(r"\d+", text)
+    if len(nums) != 2:
+        raise argparse.ArgumentTypeError(f"expected two step numbers, like 002->003: {text!r}")
+    return "->".join(f"{int(n):03d}" for n in nums)
 
 
 def _display(args, data: dict) -> None:
@@ -264,7 +277,13 @@ def _db(args) -> int:
                 print(f"dropped run {args.run}")
             else:
                 f = Filters(
-                    args.pass_, args.direction, args.block, args.kind, args.reason, args.shape
+                    pass_=args.pass_,
+                    direction=args.direction,
+                    block=args.block,
+                    pair=args.pair,
+                    kind=args.kind,
+                    reason=args.reason,
+                    shape=args.shape,
                 )
                 dbview.show(
                     db,

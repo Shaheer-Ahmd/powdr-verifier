@@ -616,6 +616,7 @@ class Filters:
     pass_: str | None = None
     direction: str | None = None
     block: str | None = None
+    pair: str | None = None  # one step, as the sweep writes it: "002->003"
     kind: str | None = None
     reason: str | None = None  # a prefix: "nonlinear" matches "nonlinear, no match"
     shape: str | None = None  # a shape id (or a prefix of one)
@@ -623,7 +624,12 @@ class Filters:
     def steps(self, run_id: int) -> tuple[str, list]:
         """WHERE clause on ``steps s``."""
         conds, params = ["s.run_id = ?"], [run_id]
-        for col, v in (("pass", self.pass_), ("direction", self.direction), ("block", self.block)):
+        for col, v in (
+            ("pass", self.pass_),
+            ("direction", self.direction),
+            ("block", self.block),
+            ("pair", self.pair),
+        ):
             if v is not None:
                 conds.append(f"s.{col} = ?")
                 params.append(v)

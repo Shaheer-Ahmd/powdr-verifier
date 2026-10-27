@@ -75,7 +75,7 @@ def show(
         parts = _hints(db, run, f, accepted, limit, top)
     elif f.shape is not None or f.reason is not None:
         parts = _obligations(db, run, f, limit, top)
-    elif f.pass_ is not None or f.block is not None:
+    elif f.pass_ is not None or f.block is not None or f.pair is not None:
         parts = _detail(db, run, f, limit, top)
     else:
         parts = _overview(db, run, f, limit)
@@ -127,7 +127,7 @@ def _overview(db: SweepDB, run, f: Filters, limit: int) -> list:
 
 
 def _detail(db: SweepDB, run, f: Filters, limit: int, top: int) -> list:
-    """One pass (or block): reasons, shapes, hints, and the steps with work left."""
+    """One pass (or block, or pair): reasons, shapes, hints, and the steps with work left."""
     t = Table(title="Undecided obligations by reason", title_justify="left", box=box.SIMPLE_HEAD)
     for col in ("direction", "kind", "reason"):
         t.add_column(col)
@@ -313,6 +313,7 @@ def _header(run, f: Filters) -> Panel:
             ("pass", f.pass_),
             ("direction", f.direction),
             ("block", f.block),
+            ("pair", f.pair),
             ("kind", f.kind),
             ("reason", f.reason),
             ("shape", f.shape),

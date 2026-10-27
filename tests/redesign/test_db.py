@@ -1,5 +1,6 @@
 """Sweeps recorded in SQLite: what is stored adds up, and the views render it."""
 
+import argparse
 import dataclasses
 from collections import Counter
 
@@ -10,6 +11,7 @@ from src.lens.canon import canon_value, canon_zero
 from src.lens.resolve import ResolveError
 from src.redesign.check import check
 from src.redesign.circuit import load_step
+from src.redesign.cli import _pair
 from src.redesign.corpus import _record, run_sweep
 from src.redesign.db import RUNG_BITS, Filters, SweepDB, render
 from src.redesign.dbview import show
@@ -95,6 +97,17 @@ def test_pass_filter(recorded):
         run_sweep("keccak", ["2106332"], passes=["nope"])
 
 
+def test_pair_filter(recorded):
+    db, _, (on, _), (off, _) = recorded
+    assert _pair("2 -> 3") == _pair("002->003") == "002->003"
+    with pytest.raises(argparse.ArgumentTypeError):
+        _pair("3")
+    f = Filters(pair="002->003", kind="constraint")
+    assert db.count_undecided(on, f) == (282, 1)  # test_opcode_flags_pinned_by_one_hot
+    c = db.compare(on, off, f, limit=5)
+    assert c.shared == 1 and {r["pair"] for r in c.discharged} == {"002->003"}
+
+
 def test_compare_rule_o_off_then_on(recorded):
     db, _, (on, _), (off, _) = recorded
     f = Filters(kind="constraint")
@@ -155,10 +168,11 @@ def test_drop_and_interrupted_runs(tmp_path):
         # "args [": brackets in the data are shown, not read as rich markup.
         ({"f": Filters(pass_="solver")}, ["Undecided obligations by reason", "args [", "hints"]),
         ({"f": Filters(reason="linear")}, ["undecided obligations in", "Obligations (first"]),
+        ({"f": Filters(pair="013->014")}, ["Undecided obligations by reason", "pair 013->014"]),
         ({"hints": True}, ["Rejected hints by reason and column family"]),
         ({"vs": "off"}, ["Totals on the shared steps", "Discharged now", "switch one_hot: off -> on"]),
     ],
-    ids=["overview", "pass", "reason", "hints", "vs"],
+    ids=["overview", "pass", "reason", "pair", "hints", "vs"],
 )
 def test_views_render(recorded, kw, titles):
     db, _, (on, _), (off, _) = recorded
