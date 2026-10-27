@@ -43,10 +43,12 @@ from src.polysolver import (
     Opaque,
     PolySolver,
     UndefinedVariable,
+    VarTable,
     poly,
     variables,
 )
 
+from .adapter import HINT_TAG
 from .circuit import Circuit, interaction_columns, substitute, substitute_interaction
 from .mapping import Mapping
 from .tables import is_row
@@ -79,6 +81,9 @@ class Obligation:
     # True if c mentions a column defined by the mapping, so c[w] differs from c.
     via_mapping: bool = False
     kind: str = "constraint"  # or "bus" for a stateless bus interaction
+    # Canonical key of c[w] (or I[w]); None if an opaque or unmapped column
+    # kept the canonical rungs from writing it out. For grouping in reports.
+    key: tuple | None = field(default=None, compare=False, repr=False)
 
 
 # Why an obligation can stay undecided. Fixed strings, so reports can group them.
@@ -123,9 +128,13 @@ class Report:
     premises_expanded: int = 0  # premise keys PolySolver computed (rule N)
     premises_split: int = 0  # premises PolySolver split into factors (rule S)
     hints_accepted: int = 0  # solved equations PolySolver checked and kept
+    hints_agreed: int = 0  # of those, equal to a value x already had (a pin): no substitution
     hints_rejected: int = 0  # hints whose check failed (not used)
     constants_solved: int = 0  # premises that pinned a variable (solve_constants)
     pinned: int = 0  # variables pinned by collapsed ranges (solve_one_hot)
+    # powdr's hints, in the order tried: (column, accepted, agreed with x's
+    # value, rule or reject kind, note, form of t: hint_form).
+    hints: list[tuple[str, bool, bool, str, str, str | None]] = field(default_factory=list)
 
     @property
     def verified(self) -> bool:
@@ -154,9 +163,17 @@ def category(o: Obligation) -> tuple[str, str, str]:
 
 
 def sweep(
-    direction: str, ref: Circuit, cand: Circuit, mapping: Mapping, solver: PolySolver
+    direction: str,
+    ref: Circuit,
+    cand: Circuit,
+    mapping: Mapping,
+    solver: PolySolver,
+    hints: list[tuple[str, Expr]] = (),
 ) -> Report:
-    """Check every candidate constraint against the reference under ``mapping``."""
+    """Check every candidate constraint against the reference under ``mapping``.
+
+    ``hints`` are the ones the solver was given, for their forms in the report.
+    """
     report = Report(direction, mapping)
     defs = solver.make_defs(mapping.defs)
     # Polynomial definitions can be written into c to get c[w] for the
@@ -202,7 +219,9 @@ def sweep(
         try:
             v = solver.implies(c, defs)
         except UndefinedVariable as exc:
-            return Obligation(name, "undecided", str(exc), reason="mapping gap")
+            return Obligation(
+                name, "undecided", str(exc), reason="mapping gap", key=key
+            )
         if isinstance(v, Implied):
             detail = ", ".join(
                 v.premises
@@ -285,6 +304,7 @@ def sweep(
                     via_mapping=mapped,
                     kind="bus",
                 )
+        ob = replace(ob, key=key)
         bus_cache[key] = ob
         return ob
 
@@ -299,7 +319,47 @@ def sweep(
     report.pinned = solver.pinned
     report.hints_accepted = solver.solved_accepted - solver.constants_solved
     report.hints_rejected = solver.solved_rejected
+    forms = {x: hint_form(t) for x, t in hints}
+    report.hints = [
+        (
+            tag.removeprefix(HINT_TAG),
+            isinstance(v, Implied),
+            agreed,
+            v.rule if isinstance(v, Implied) else v.kind,
+            "" if isinstance(v, Implied) else v.note,
+            forms.get(tag.removeprefix(HINT_TAG)),
+        )
+        for tag, v, agreed in solver.solved_log
+        if tag.startswith(HINT_TAG)
+    ]
+    report.hints_agreed = sum(h[2] for h in report.hints)
     return report
+
+
+def hint_form(t: Expr) -> str:
+    """The form of a hint's value t; y is a column, a and c are constants.
+
+    t is expanded as written, without the solved equations, so a hint's form
+    is the same in every run.
+
+    "c" (x := 5), "y" (x := y), "y + c" (x := y - 4), "a*y + c" (x := 256*y),
+    "linear" (two or more columns, x := y + 256*z) or "nonlinear".
+    """
+    table = VarTable()
+    try:
+        t = poly.expand(t, lambda n: poly.var_poly(table.var(n)), BABYBEAR)
+    except poly.ExpansionLimit:  # thousands of terms: never linear in practice
+        return "nonlinear"
+    monos = [m for m in t if m]
+    if not monos:
+        return "c"
+    if any(poly.degree(m) > 1 for m in monos):
+        return "nonlinear"
+    if len(monos) > 1:
+        return "linear"
+    if t[monos[0]] != 1:
+        return "a*y + c"
+    return "y + c" if () in t else "y"
 
 
 def _normal_key(solver: PolySolver, bi: dict, defs=None) -> tuple | None:
@@ -430,6 +490,7 @@ def _key(e: Expr):
 
 def _remember(cache: dict, key, ob: Obligation) -> Obligation:
     """Cache a verdict under its key (when there is one) and return it."""
+    ob = replace(ob, key=key)
     if key is not None:
         cache[key] = ob
     return ob

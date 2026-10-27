@@ -50,7 +50,7 @@ def check_step(
             table, before, use_ranges, hints, use_constants, use_one_hot
         )
         m = completeness_mapping(before, after, subs)
-        reports.append(sweep("completeness", before, after, m, solver))
+        reports.append(sweep("completeness", before, after, m, solver, hints))
     if "soundness" in directions:
         solver = reference_solver(
             table, after, use_ranges, constants=use_constants, one_hot=use_one_hot

@@ -172,7 +172,7 @@ def test_flag_hints_after_the_pass():
     hints = [("and", 0), ("add", 0), ("sub", 0), ("xor", 1), ("or", 0)]
     rules = [s.add_solved(x, t, tag=f"h:{x}").rule for x, t in hints]
     assert rules == ["trivial"] * 5
-    assert s.solved_accepted == 5 and s.solved_rejected == 0
+    assert s.solved_accepted == s.solved_agreed == 5 and s.solved_rejected == 0
     assert s.solved_count == 5 and s.pinned == 5
 
 

@@ -4,6 +4,7 @@ import pytest
 from src.redesign.check import check, check_step
 from src.redesign.circuit import Circuit, byte_ranges, load_step, substitute
 from src.redesign.mapping import MissingDefinition
+from src.redesign.sweep import hint_form
 
 # The is-zero merge of rule_based (008 -> 009); the last five use 1 - cmp.
 IS_ZERO = ["2099672", "2105000", "2105468", "2105476", "2106332",
@@ -114,6 +115,22 @@ def test_byte_ranges_are_bare_receive_limbs():
     after = load_step("keccak", "2106332", "009")
     names = {x for x, _, _ in byte_ranges(after)}
     assert {"a__0_3@105", "a__3_3@108"} <= names
+
+
+@pytest.mark.parametrize(
+    "t, form",
+    [
+        (5, "c"),
+        ("y", "y"),
+        (["y", "-", 4], "y + c"),
+        ([256, "*", "y"], "a*y + c"),
+        ([["y", "+", [256, "*", "z"]], "+", 1], "linear"),
+        (["y", "*", "z"], "nonlinear"),
+        ([["y", "+", 1], "-", "y"], "c"),  # expanded, so cancellations count
+    ],
+)
+def test_hint_form(t, form):
+    assert hint_form(t) == form
 
 
 def test_substitute_does_not_mutate():
