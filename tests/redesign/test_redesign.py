@@ -88,6 +88,23 @@ def test_mixed_is_zero_witness():
     assert all(w[0] == f and w[1] == "*" for w in others)
 
 
+@pytest.mark.parametrize(
+    "one_hot, hints, undecided",
+    [(True, (6339, 4564), 282), (False, (4285, 6618), 1150)],
+    ids=["one-hot pass", "no one-hot pass"],
+)
+def test_opcode_flags_pinned_by_one_hot(one_hot, hints, undecided):
+    # solver pass: the opcode flags follow only from booleanity, the sum of
+    # the flags and the opcode selector together. The pass pins them before
+    # the hints (which then agree), and the pins ungate the timestamp checks.
+    # What stays undecided is in the shift chip.
+    (cmp,) = check("keccak", "2100224", "002", "003", ("completeness",),
+                   use_one_hot=one_hot)
+    assert (cmp.hints_accepted, cmp.hints_rejected) == hints
+    assert cmp.counts("constraint")["undecided"] == undecided
+    assert (cmp.pinned > 0) == one_hot
+
+
 def test_soundness_opposite_polarity_is_normalized():
     _, snd = check("keccak", "2099556", "008", "009")
     assert snd.mapping.witnesses and snd.verified

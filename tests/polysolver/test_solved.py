@@ -55,10 +55,15 @@ def test_value_must_not_mention_x():
 
 
 def test_solved_once():
-    s = solver({"x", "a"}, [sub("x", "a")])
+    # A second equation for x is checked against x's value: the same value is
+    # accepted and changes nothing, another one is rejected.
+    s = solver({"x", "a", "b"}, [sub("x", "a")])
     assert isinstance(s.add_solved("x", "a", tag="h1"), Implied)
     v = s.add_solved("x", "a", tag="h2")
+    assert v.rule == "trivial" and s.solved_count == 1 and s.solved_accepted == 2
+    v = s.add_solved("x", "b", tag="h3")
     assert isinstance(v, Unknown) and v.kind == "already-solved"
+    assert s.implies(sub("x", "a")).solved == ("h1",)
 
 
 def test_check_uses_earlier_solved_equations():

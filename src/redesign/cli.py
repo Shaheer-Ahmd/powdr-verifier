@@ -41,6 +41,11 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="do not solve premises that pin a variable to a constant",
     )
+    c.add_argument(
+        "--no-one-hot",
+        action="store_true",
+        help="skip the one-hot pass (booleanity ranges, flag pins)",
+    )
     c.add_argument("--root", type=Path, help="dump root (default: powdr-dumps)")
     c.add_argument("--json", action="store_true", help="machine-readable output")
     c.add_argument("-v", "--verbose", action="store_true", help="list every obligation")
@@ -59,6 +64,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-constants",
         action="store_true",
         help="do not solve premises that pin a variable to a constant",
+    )
+    s.add_argument(
+        "--no-one-hot",
+        action="store_true",
+        help="skip the one-hot pass (booleanity ranges, flag pins)",
     )
     s.add_argument("--root", type=Path, help="dump root (default: powdr-dumps)")
     s.add_argument("--save", type=Path, help="also write the results as JSON")
@@ -104,6 +114,7 @@ def _as_dict(r: Report) -> dict:
         "hints_accepted": r.hints_accepted,
         "hints_rejected": r.hints_rejected,
         "constants_solved": r.constants_solved,
+        "pinned": r.pinned,
         "witnesses": [
             {"columns": cols, "witness": w} for cols, w in r.mapping.witnesses
         ],
@@ -127,7 +138,7 @@ def _print(r: Report, verbose: bool) -> None:
     print(
         f"{r.direction}: {status}  ({counts}; {r.premises_expanded} premises expanded, {r.premises_split} split"
         f"; hints {r.hints_accepted} used, {r.hints_rejected} rejected"
-        f"; {r.constants_solved} constants solved)"
+        f"; {r.constants_solved} constants solved; {r.pinned} pinned)"
     )
     for cols, w in r.mapping.witnesses:
         print(f"  witness  {', '.join(cols)} := {json.dumps(w)}")
@@ -162,6 +173,7 @@ def _sweep(args, directions) -> int:
             on_block=progress,
             use_hints=not args.no_hints,
             use_constants=not args.no_constants,
+            use_one_hot=not args.no_one_hot,
         )
     if args.save:
         args.save.write_text(json.dumps(data))
@@ -199,6 +211,7 @@ def main(argv: list[str] | None = None) -> int:
             args.root,
             not args.no_hints,
             not args.no_constants,
+            not args.no_one_hot,
         )
     except (ResolveError, FileNotFoundError, MissingDefinition) as exc:
         print(f"redesign: {type(exc).__name__}: {exc}", file=sys.stderr)
