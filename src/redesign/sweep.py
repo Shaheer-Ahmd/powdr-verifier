@@ -125,6 +125,7 @@ class Report:
     hints_accepted: int = 0  # solved equations PolySolver checked and kept
     hints_rejected: int = 0  # hints whose check failed (not used)
     constants_solved: int = 0  # premises that pinned a variable (solve_constants)
+    pinned: int = 0  # variables pinned by collapsed ranges (solve_one_hot)
 
     @property
     def verified(self) -> bool:
@@ -295,7 +296,8 @@ def sweep(
     report.premises_expanded = solver.premises_expanded
     report.premises_split = solver.premises_split
     report.constants_solved = solver.constants_solved
-    report.hints_accepted = solver.solved_count - solver.constants_solved
+    report.pinned = solver.pinned
+    report.hints_accepted = solver.solved_accepted - solver.constants_solved
     report.hints_rejected = solver.solved_rejected
     return report
 
