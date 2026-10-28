@@ -220,7 +220,8 @@ def _print(r: Report, verbose: bool) -> None:
         f"{r.direction}: {status}  ({counts}; {r.premises_expanded} premises expanded, {r.premises_split} split"
         f"; hints {r.hints_accepted} used ({r.hints_agreed} agreed with a pin),"
         f" {r.hints_rejected} rejected"
-        f"; {r.constants_solved} constants solved; {r.pinned} pinned)"
+        f"; {r.constants_solved} constants solved; {r.pinned} pinned"
+        f"; rule C: {r.case_splits} searches, {r.case_split_nodes} values tried)"
     )
     for cols, w in r.mapping.witnesses:
         print(f"  witness  {', '.join(cols)} := {json.dumps(w)}")
