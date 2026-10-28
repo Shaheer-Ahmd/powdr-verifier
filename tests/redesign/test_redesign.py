@@ -124,6 +124,16 @@ def test_load_store_flags_pinned_by_rule_c(case_split, hints, undecided):
     assert cmp.case_splits == (96 if case_split else 0)  # one search per instance
 
 
+def test_load_store_flags_two_fits_agree_on():
+    # 2099796 solver pass, instance 3: two flag combinations fit, (1, 0, 1, 0)
+    # and (1, 1, 0, 0), both with is_load = 0. Rule C pins f0, f3 and is_load,
+    # which agree, and not f1 or f2; powdr hints exactly those three.
+    (cmp,) = check("keccak", "2099796", "002", "003", ("completeness",))
+    assert (cmp.counts("constraint")["undecided"], cmp.counts("bus")["undecided"]) == (6, 1)
+    names = {h[0] for h in cmp.hints if h[1]}
+    assert {"flags__0_3@136", "flags__3_3@139", "is_load_3@141"} <= names
+
+
 def test_soundness_opposite_polarity_is_normalized():
     _, snd = check("keccak", "2099556", "008", "009")
     assert snd.mapping.witnesses and snd.verified

@@ -1,4 +1,4 @@
-"""Rule C in derive(): a group of finite-domain variables that only one combination fits is pinned."""
+"""Rule C in derive(): a variable with one value in every combination of its group that fits is pinned."""
 from functools import reduce
 
 import pytest
@@ -69,11 +69,25 @@ def test_toy_pins_both_flags():
     assert v.rule == "trivial" and v.solved == ("dec", "sum", "t_f", "t_g")
 
 
-def test_two_fits_pin_nothing():
+def test_two_fits_that_agree_on_nothing_pin_nothing():
     s = solver(["f", "g"], {"t_f": ternary("f"), "t_g": ternary("g"), "sum": sub(add("f", "g"), 2)})
     assert pins(s) == {} and s.case_splits == 1
     # It stops at the second fit: f = 0 (g = 0, 1, 2), then f = 1 (g = 0, 1).
     assert s.case_split_nodes == 7
+
+
+def test_variables_every_fit_agrees_on_are_pinned():
+    # f + g = 2 has three fits, and h*(f + g) = 4 gives h = 2 in each.
+    tern3 = {f"t_{x}": ternary(x) for x in "fgh"}
+    s = solver(["f", "g", "h"], {**tern3, "sum": sub(add("f", "g"), 2),
+                                 "hsum": sub(mul("h", add("f", "g")), 4)})
+    assert pins(s) == {"h": 2}
+    # Agreeing in the first two fits is not enough: 2k = f(f - 1) is 0 for
+    # f = 0 and f = 1, but 1 for f = 2.
+    tern3 = {f"t_{x}": ternary(x) for x in "fgk"}
+    s = solver(["f", "g", "k"], {**tern3, "sum": sub(add("f", "g"), 2),
+                                 "k": sub(mul(2, "k"), mul("f", sub("f", 1)))})
+    assert pins(s) == {} and s.case_splits == 1
 
 
 def test_contradiction_pins_nothing():
@@ -94,13 +108,13 @@ def test_premise_with_a_column_without_domain_is_skipped():
     assert s.implies(sub("w", "r")).rule == "normalize"  # f = 2 ungated it
 
 
-def test_many_fits_stop_at_the_second():
-    # Eight booleans with four on: 70 combinations fit.
+def test_many_fits_cost_less_than_all_of_them():
+    # Eight booleans with four on: 70 combinations fit, and none pins a variable.
     names = [f"m{i}" for i in range(8)]
     premises = {f"b{i}": boolean(x) for i, x in enumerate(names)}
-    s = solver(names, {**premises, "sum": sub(add(*names), 4)})
+    s = solver(names, {**premises, "sum": sub(add(*names), 4)}, two_value=True)
     assert pins(s) == {} and s.case_splits == 1
-    assert s.case_split_nodes < 100  # a full enumeration tries 510
+    assert s.case_split_nodes < 510  # a full enumeration tries 510
 
 
 @pytest.mark.parametrize(
@@ -123,15 +137,17 @@ def test_many_fits_stop_at_the_second():
 )
 def test_groups_the_one_hot_steps_leave(names, premises, want):
     assert pins(solver(names, premises, case_split=False)) == {}
-    s = solver(names, premises)
+    s = solver(names, premises, two_value=True)  # each group has a boolean
     assert pins(s) == want and s.case_splits == 1
 
 
-def test_two_value_off_splits_only_on_more_values():
+def test_two_value_domains_only_when_asked():
+    # Off by default: a boolean-only group is not searched, a ternary one is.
     premises = {"b_a": boolean("a"), "b_b": boolean("b"), "sum": sub(add("a", mul(2, "b")), 1)}
-    s = solver(["a", "b"], premises, two_value=False)
+    s = solver(["a", "b"], premises)
     assert pins(s) == {} and s.case_splits == 0
-    assert pins(toy(two_value=False)) == {"f": 2, "g": 0}
+    assert pins(solver(["a", "b"], premises, two_value=True)) == {"a": 1, "b": 0}
+    assert pins(toy()) == {"f": 2, "g": 0}
 
 
 # ---------------------------------------------------------------- the loop

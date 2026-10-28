@@ -37,7 +37,7 @@ def run_sweep(
     use_constants: bool = True,
     use_one_hot: bool = True,
     use_case_split: bool = True,
-    use_two_value: bool = True,
+    use_two_value: bool = False,
     passes: Iterable[str] = (),
     on_pair: Callable[[list[dict], list[Report | None], Circuit, Circuit], None]
     | None = None,

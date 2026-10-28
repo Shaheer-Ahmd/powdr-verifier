@@ -39,7 +39,7 @@ def check_step(
     use_constants: bool = True,
     use_one_hot: bool = True,
     use_case_split: bool = True,
-    use_two_value: bool = True,
+    use_two_value: bool = False,
 ) -> list[Report]:
     """Completeness: Before is the reference. Soundness: After is."""
     steps = {"case_split": use_case_split, "two_value": use_two_value}
@@ -80,7 +80,7 @@ def check(
     use_constants: bool = True,
     use_one_hot: bool = True,
     use_case_split: bool = True,
-    use_two_value: bool = True,
+    use_two_value: bool = False,
 ) -> list[Report]:
     before = load_step(group, block, step_from, root)
     after = load_step(group, block, step_to, root)

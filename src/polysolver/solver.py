@@ -34,8 +34,9 @@ derive() steps, each sound on its own:
 - C (case split), once the steps above have nothing left: a premise whose
   variables all have a set of values couples them, and x's group is what such
   premises reach from x. In every model the group takes one combination of
-  values that fits them all, so if only one does, each variable is pinned.
-  Leaving a premise out is sound, so one with any other variable is skipped.
+  values that fits them all, so a variable with the same value in every
+  combination that fits is pinned. Leaving a premise out is sound, so one
+  with any other variable is skipped.
 
 derive() stops: domains only shrink, a variable is replaced at most once, and
 C searches only after a coupling premise changed (its variables are seeds).
@@ -145,7 +146,7 @@ class PolySolver:
         constants: bool = True,
         one_hot: bool = True,
         case_split: bool = True,
-        two_value: bool = True,
+        two_value: bool = False,
     ):
         self.table = table
         self.p = p
@@ -917,7 +918,7 @@ class PolySolver:
     # ------------------------------------------------------------ rule C
 
     def _finite(self, v: Var) -> bool:
-        """v has a set of values rule C splits on (two values only if two_value is on)."""
+        """v has a set of values rule C splits on (of two values only with two_value)."""
         d = self._domains.get(v)
         return d is not None and d.values is not None and (
             self._two_value or len(d.values) > 2
@@ -979,7 +980,12 @@ class PolySolver:
         return (dom, coupling) if coupling else None
 
     def _case_split_search(self, dom: dict, coupling: list[int]) -> None:
-        """Pin the group's variables if exactly one combination fits the coupling premises."""
+        """Pin each variable that has one value in every combination that fits.
+
+        Depth first until a second combination fits; one alone pins them all.
+        Where two fit, a variable they give different values stays as it is;
+        one they agree on is pinned if no combination gives it another value.
+        """
         self.case_splits += 1
         keys = {i: self._premise_key(i) for i in coupling}
         cvars = {i: self._premise_vars(i) for i in coupling}
@@ -999,9 +1005,7 @@ class PolySolver:
             checks[max(pos[y] for y in cvars[i])].append(terms)
 
         p, n = self.p, len(order)
-        choices = [dom[w] for w in order]
         vals = [0] * n
-        fit: list[tuple[int, ...]] = []
         nodes = 0
 
         def fits(terms) -> bool:
@@ -1012,14 +1016,15 @@ class PolySolver:
                 total += c
             return total % p == 0
 
-        # Depth first, without recursion, until a second combination fits:
-        # then nothing is decided.
-        nxt = [0] * n  # per level, the next choice to try
-        level = 0
-        try:
-            while level >= 0 and len(fit) < 2:
+        def search(choices: list, want: int) -> list[tuple[int, ...]]:
+            """Up to ``want`` combinations of ``choices`` that fit, without recursion."""
+            nonlocal nodes
+            found: list[tuple[int, ...]] = []
+            nxt = [0] * n  # per level, the next choice to try
+            level = 0
+            while level >= 0 and len(found) < want:
                 if level == n:
-                    fit.append(tuple(vals))
+                    found.append(tuple(vals))
                     level -= 1
                 elif nxt[level] == len(choices[level]):
                     nxt[level] = 0
@@ -1032,17 +1037,34 @@ class PolySolver:
                         raise _TooManyCases
                     if all(fits(t) for t in checks[level]):
                         level += 1
+            return found
+
+        choices = [dom[w] for w in order]
+        known: dict[int, int] = {}  # position -> its value in every fit
+        try:
+            fit = search(choices, 2)
+            # None fits: the premises contradict each other, which is not used.
+            if len(fit) == 1:
+                known = dict(enumerate(fit[0]))
+            for j in range(n if len(fit) == 2 else 0):
+                v = fit[0][j]
+                if any(f[j] != v for f in fit):
+                    continue  # two fits give it different values
+                others = [u for u in choices[j] if u != v]
+                found = search(choices[:j] + [others] + choices[j + 1 :], 1)
+                if found:
+                    fit += found  # may show other positions vary too
+                else:
+                    known[j] = v
         except _TooManyCases:
-            self.case_split_capped += 1
-            fit = []
+            self.case_split_capped += 1  # what was proved before stays proved
         self.case_split_nodes += nodes
-        # None fits: the premises contradict each other, which is not used.
-        if len(fit) != 1:
+        if not known:
             return
         tags = [t for i in coupling for t in self._premise_tags(i)]
         tags += self._range_tags(order)
-        for w, v in zip(order, fit[0]):
-            self._reduce_domain(w, v, v, tags, frozenset((v,)))
+        for j, v in known.items():
+            self._reduce_domain(order[j], v, v, tags, frozenset((v,)))
 
     # ------------------------------------------------------------ work list
 

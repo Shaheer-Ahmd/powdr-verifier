@@ -56,9 +56,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help="skip rule C (case split over variables with a few values each)",
     )
     c.add_argument(
-        "--no-two-value",
+        "--two-value",
         action="store_true",
-        help="rule C splits only on variables with three values or more",
+        help="rule C also splits on variables with two values (booleans)",
     )
     c.add_argument("--root", type=Path, help="dump root (default: powdr-dumps)")
     c.add_argument("--json", action="store_true", help="machine-readable output")
@@ -90,9 +90,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help="skip rule C (case split over variables with a few values each)",
     )
     s.add_argument(
-        "--no-two-value",
+        "--two-value",
         action="store_true",
-        help="rule C splits only on variables with three values or more",
+        help="rule C also splits on variables with two values (booleans)",
     )
     s.add_argument(
         "--pass",
@@ -266,7 +266,7 @@ def _sweep(args, directions) -> int:
                 use_constants=not args.no_constants,
                 use_one_hot=not args.no_one_hot,
                 use_case_split=not args.no_case_split,
-                use_two_value=not args.no_two_value,
+                use_two_value=args.two_value,
                 passes=args.passes,
                 on_pair=record if db else None,
             )
@@ -355,7 +355,7 @@ def main(argv: list[str] | None = None) -> int:
             not args.no_constants,
             not args.no_one_hot,
             not args.no_case_split,
-            not args.no_two_value,
+            args.two_value,
         )
     except (ResolveError, FileNotFoundError, MissingDefinition) as exc:
         print(f"redesign: {type(exc).__name__}: {exc}", file=sys.stderr)
