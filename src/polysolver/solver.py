@@ -144,10 +144,12 @@ class PolySolver:
         self.premises_expanded = 0  # premise keys computed (rule N)
         self.premises_split = 0  # premises split into factors (rule S)
         self.solved_accepted = 0  # add_solved calls accepted (also values equal to a pin)
+        self.solved_agreed = 0  # of those, x already had that value: nothing changed
         self.solved_rejected = 0  # add_solved calls whose check failed
         self.constants_solved = 0  # equations added by solve_constants
         self.pinned = 0  # variables replaced because their range collapsed
-        self.solved_log: list[tuple[str, Verdict]] = []  # (tag, verdict) per add_solved call
+        # (tag, verdict, agreed with x's value) per add_solved call
+        self.solved_log: list[tuple[str, Verdict, bool]] = []
 
     # ------------------------------------------------------------ inputs
 
@@ -183,10 +185,12 @@ class PolySolver:
         queries. On Unknown nothing changes: the equation is rejected, which
         costs completeness only. If x is already solved (e.g. pinned by
         solve_one_hot), the query compares its value with t, and an Implied
-        verdict also changes nothing. Every verdict goes into ``solved_log``.
+        verdict also changes nothing. Every verdict goes into ``solved_log``,
+        with whether it agreed with a value x already had.
         """
+        agreed = self.solved_agreed
         verdict = self._add_solved(x, t, tag)
-        self.solved_log.append((tag, verdict))
+        self.solved_log.append((tag, verdict, self.solved_agreed > agreed))
         return verdict
 
     def _add_solved(self, x: str, t: Expr, tag: str) -> Verdict:
@@ -202,6 +206,7 @@ class PolySolver:
             if not isinstance(verdict, Implied):
                 return self._reject(f"{x} is already solved", "already-solved")
             self.solved_accepted += 1
+            self.solved_agreed += 1
             return verdict
         # t must not mention x, or "replace x by t" would not remove x.
         if xv in P.variables_of(rhs):

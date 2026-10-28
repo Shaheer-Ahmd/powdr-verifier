@@ -25,6 +25,7 @@ SHAPE_CHARS = 140  # shape and expression text in tables
 # Data goes into tables as Text, never as a str: rich would read "[x0 - 8*x1, 3]"
 # as markup and drop it.
 CW = Text("c[w] = 0")
+HINTS = "hints added / agreed / rejected"
 
 
 def runs(db: SweepDB, limit: int, console: Console | None = None) -> None:
@@ -32,7 +33,7 @@ def runs(db: SweepDB, limit: int, console: Console | None = None) -> None:
     t = Table(title=f"Runs in {db.path}", title_justify="left", box=box.SIMPLE_HEAD)
     for col in ("id", "created", "label", "code", "switches off", "scope"):
         t.add_column(col)
-    for col in ("steps", "verified", "undecided", "hints used / rejected", "seconds"):
+    for col in ("steps", "verified", "undecided", HINTS, "seconds"):
         t.add_column(col, justify="right")
     for r in db.runs(limit):
         created = r["created"][:16].replace("T", " ")
@@ -48,7 +49,7 @@ def runs(db: SweepDB, limit: int, console: Console | None = None) -> None:
             f"{r['steps']:,}",
             _cell(r["verified"] or 0, r["steps"]),
             f"{r['undecided'] or 0:,}",
-            f"{r['hints_accepted'] or 0:,} / {r['hints_rejected'] or 0:,}",
+            _hint_counts(r),
             f"{r['seconds']:.0f}" if r["seconds"] is not None else "",
         )
     console.print(t)
@@ -101,7 +102,7 @@ def _overview(db: SweepDB, run, f: Filters, limit: int) -> list:
     for col in ("steps", "fully discharged", "errors", "unmapped", "undecided"):
         t.add_column(col, justify="right")
     t.add_column("main reasons", style="dim")
-    t.add_column("hints used / rejected", justify="right")
+    t.add_column(HINTS, justify="right")
     t.add_column("discharged via a hint", justify="right")
     last = None
     for r in rows:
@@ -118,7 +119,7 @@ def _overview(db: SweepDB, run, f: Filters, limit: int) -> list:
             _n(r["with_unmapped"]),
             _n(sum(u.values())),
             Text(_top(u)),
-            f"{r['hints_accepted'] or 0:,} / {r['hints_rejected'] or 0:,}" if compl else _dash(),
+            _hint_counts(r) if compl else _dash(),
             _cell(with_hint, discharged) if compl else _dash(),
             style="dim" if done else None,
         )
@@ -177,26 +178,66 @@ def _obligations(db: SweepDB, run, f: Filters, limit: int, top: int) -> list:
 
 def _hints(db: SweepDB, run, f: Filters, accepted: bool, limit: int, top: int) -> list:
     which = "Accepted" if accepted else "Rejected"
+    why = "rule" if accepted else "reason"
+    forms = Table(
+        title=f"{which} hints by the form of t",
+        title_justify="left",
+        caption="y: a column; a, c: constants",
+        caption_justify="left",
+        box=box.SIMPLE_HEAD,
+    )
+    forms.add_column("x := t")
+    forms.add_column(why)
+    if accepted:
+        forms.add_column("outcome")
+    forms.add_column("hints", justify="right")
+    forms.add_column("steps", justify="right")
+    for r in db.hint_forms(run["id"], f, accepted):
+        outcome = [Text(_agreed(r["agreed"]))] if accepted else []
+        forms.add_row(
+            Text(_form(r["form"])), Text(r["kind"]), *outcome, f"{r['n']:,}", f"{r['steps']:,}"
+        )
     t = Table(
-        title=f"{which} hints by {'rule' if accepted else 'reason'} and column family",
+        title=f"{which} hints by {why} and column family",
         title_justify="left",
         box=box.SIMPLE_HEAD,
     )
-    t.add_column("rule" if accepted else "reason")
+    t.add_column(why)
     t.add_column("family")
+    t.add_column("x := t")
+    if accepted:
+        t.add_column("outcome")
     t.add_column("hints", justify="right")
     t.add_column("steps", justify="right")
     for r in db.hint_kinds(run["id"], f, accepted)[:top]:
-        t.add_row(Text(r["kind"]), Text(r["family"]), f"{r['n']:,}", f"{r['steps']:,}")
+        outcome = [Text(_agreed(r["agreed"]))] if accepted else []
+        t.add_row(
+            Text(r["kind"]),
+            Text(r["family"]),
+            Text(_form(r["form"])),
+            *outcome,
+            f"{r['n']:,}",
+            f"{r['steps']:,}",
+        )
     ex = Table(title=f"{which} hints (first {limit})", title_justify="left", box=box.SIMPLE_HEAD)
-    for col in ("block", "pair", "pass", "column", "kind"):
+    for col in ("block", "pair", "pass", "column", "x := t", "kind"):
         ex.add_column(col)
+    if accepted:
+        ex.add_column("outcome")
     ex.add_column("note", overflow="fold", style="dim")
     for h in db.hints(run["id"], f, accepted, limit):
+        outcome = [Text(_agreed(h["agreed"]))] if accepted else []
         ex.add_row(
-            h["block"], h["pair"], h["pass"], Text(h["col"]), Text(h["kind"]), _cut(h["note"])
+            h["block"],
+            h["pair"],
+            h["pass"],
+            Text(h["col"]),
+            Text(_form(h["form"])),
+            Text(h["kind"]),
+            *outcome,
+            _cut(h["note"]),
         )
-    return [_hint_summary(db, run, f), t, ex]
+    return [_hint_summary(db, run, f), forms, t, ex]
 
 
 def _compare(db: SweepDB, run, base, f: Filters, limit: int, top: int) -> list:
@@ -233,10 +274,15 @@ def _compare(db: SweepDB, run, base, f: Filters, limit: int, top: int) -> list:
         ("verified", "steps fully discharged", True),
         ("undecided", "undecided obligations", False),
         ("hints_accepted", "hints used", True),
+        ("hints_agreed", "  of them, agreed with a pin", None),
         ("hints_rejected", "hints rejected", False),
         ("pinned", "pins", None),
         ("constants_solved", "constants solved", None),
     ):
+        if key == "hints_agreed" and None in (b[key], a[key]):
+            # A run from before schema 2: unknown, not 0.
+            totals.add_row(label, _maybe(b[key]), _maybe(a[key]), _dash())
+            continue
         x, y = b[key] or 0, a[key] or 0
         totals.add_row(label, f"{x:,}", f"{y:,}", _delta(y - x, up))
 
@@ -271,13 +317,20 @@ def _compare(db: SweepDB, run, base, f: Filters, limit: int, top: int) -> list:
     if c.regressed:
         parts.append(_changed(f"Regressed (first {limit})", c.regressed, now=False))
     if c.hints:
-        h = Table(title="Hints whose verdict changed", title_justify="left", box=box.SIMPLE_HEAD)
+        h = Table(title="Hints whose outcome changed", title_justify="left", box=box.SIMPLE_HEAD)
         h.add_column("change")
+        h.add_column("x := t")
         h.add_column("family")
         h.add_column("hints", justify="right")
         for r in c.hints[:top]:
-            what = Text("now accepted", style="green") if r["now"] else Text("now rejected", style="red")
-            h.add_row(what, Text(r["family"]), f"{r['n']:,}")
+            # added <-> agreed is neither progress nor a regression.
+            style = {"rejected": "green"}.get(r["was"]) or {"rejected": "red"}.get(r["now"])
+            h.add_row(
+                Text(f"{r['was']} -> {r['now']}", style=style),
+                Text(_form(r["form"])),
+                Text(r["family"]),
+                f"{r['n']:,}",
+            )
         parts.append(h)
     if c.step_changes:
         s = Table(title="Steps whose verdict changed", title_justify="left", box=box.SIMPLE_HEAD)
@@ -390,19 +443,30 @@ def _hint_summary(db: SweepDB, run, f: Filters) -> Text | None:
     if not rows:
         return None
     used = sum(r["hints_accepted"] or 0 for r in rows)
+    agreed = [r["hints_agreed"] for r in rows]
     rejected = sum(r["hints_rejected"] or 0 for r in rows)
     pins = sum(r["pinned"] or 0 for r in rows)
     consts = sum(r["constants_solved"] or 0 for r in rows)
-    why = Counter()
-    for r in db.hint_kinds(run["id"], f, accepted=False):
+    why, forms = Counter(), Counter()
+    for r in db.hint_forms(run["id"], f, accepted=False):
         why[r["kind"]] += r["n"]
+        if r["form"] is not None:  # None: a run from before schema 3
+            forms[f"x := {r['form']}"] += r["n"]
     compl = [v for (_, d), v in db.via_hint(run["id"], f).items() if d == "completeness"]
     discharged = sum(n for n, _ in compl)
     with_hint = sum(h for _, h in compl)
     out = Text("Completeness: ", style="bold")
-    out.append(f"hints {used:,} used, {rejected:,} rejected")
+    if None in agreed:  # a run from before schema 2
+        out.append(f"hints {used:,} used, {rejected:,} rejected")
+    else:
+        out.append(
+            f"hints {used - sum(agreed):,} added, {sum(agreed):,} agreed with a pin,"
+            f" {rejected:,} rejected"
+        )
     if why:
         out.append(f" ({_top(why, 4)})", style="dim")
+    if forms:
+        out.append(f" (by form: {_top(forms, 4)})", style="dim")
     out.append(f"; {pins:,} pins; {consts:,} constants solved; ")
     out.append(f"{with_hint:,} of {discharged:,} discharged obligations used a hint")
     out.append("\n(--hints lists the rejected ones)", style="dim")
@@ -467,6 +531,26 @@ def _scope(r) -> str:
 
 def _onoff(v) -> str:
     return {True: "on", False: "off", None: "?"}[v]
+
+
+def _hint_counts(r) -> str:
+    """Hints added / agreed with a pin / rejected; a run from before schema 2 knows only used."""
+    used, rejected, agreed = r["hints_accepted"] or 0, r["hints_rejected"] or 0, r["hints_agreed"]
+    if agreed is None:
+        return f"{used:,} used / {rejected:,}"
+    return f"{used - agreed:,} / {agreed:,} / {rejected:,}"
+
+
+def _form(form: str | None) -> str:
+    return "?" if form is None else form
+
+
+def _agreed(agreed) -> str:
+    return {None: "?", 0: "added", 1: "agreed"}[agreed]
+
+
+def _maybe(n) -> str:
+    return "?" if n is None else f"{n:,}"
 
 
 def _n(n) -> Text | str:

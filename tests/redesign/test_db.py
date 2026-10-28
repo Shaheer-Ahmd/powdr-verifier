@@ -79,15 +79,55 @@ def test_records_add_up(recorded):
 
 
 def test_hint_verdicts_match_the_counters(recorded):
-    db, _, (run, _), _ = recorded
+    db, _, (run, _), (off, _) = recorded
     for s in _steps(db, run).values():
         n = Counter(
-            r["accepted"]
-            for r in db.query("SELECT accepted FROM hints WHERE step_id = ?", (s["id"],))
+            (r["accepted"], r["agreed"])
+            for r in db.query("SELECT * FROM hints WHERE step_id = ?", (s["id"],))
         )
-        assert (n[1], n[0]) == (s["hints_accepted"], s["hints_rejected"])
-    s = _steps(db, run)[("2100224", "002->003", "completeness")]
+        assert n[(0, 1)] == 0  # a rejected hint never agreed
+        assert (n[(1, 0)] + n[(1, 1)], n[(0, 0)]) == (s["hints_accepted"], s["hints_rejected"])
+        assert n[(1, 1)] == s["hints_agreed"]
+    key = ("2100224", "002->003", "completeness")
+    s = _steps(db, run)[key]
     assert (s["hints_accepted"], s["hints_rejected"]) == (6339, 4564)  # test_opcode_flags_...
+    assert s["hints_agreed"] == s["pinned"] == 3216  # every pin has a hint that agrees
+    assert _steps(db, off)[key]["hints_agreed"] == 0  # no pins, nothing to agree with
+    # Rejected there: the load/store and shift constants, and the write_data copies.
+    rejected = {
+        r["form"]: r["n"] for r in db.hint_forms(run, Filters(pair="002->003"), accepted=False)
+    }
+    assert rejected == {"c": 3564, "y": 1000}
+
+
+SOLVER = {"passes": ["solver"], "directions": ("completeness",)}  # steps with hints
+
+
+def test_schema_1_gains_the_agreed_bit_and_forms(tmp_path):
+    path = tmp_path / "x.db"
+    with SweepDB(path) as db:
+        run, _ = _record_run(db, "keccak", ["2106332"], **SOLVER)
+        # Back to schema 1: no agreed bit and no forms anywhere.
+        db.con.execute("ALTER TABLE hints DROP COLUMN agreed")
+        db.con.execute("ALTER TABLE hints DROP COLUMN form")
+        db.con.execute("ALTER TABLE steps DROP COLUMN hints_agreed")
+        db.con.execute("PRAGMA user_version = 1")
+    with SweepDB(path) as db:
+        assert db.query("PRAGMA user_version")[0][0] == 3
+        old = db.query("SELECT COUNT(*), COUNT(agreed), COUNT(form) FROM hints")[0]
+        assert old[0] > 0 and (old[1], old[2]) == (0, 0)
+        assert db.runs()[0]["hints_agreed"] is None  # unknown, not 0
+        again, _ = _record_run(db, "keccak", ["2106332"], **SOLVER)
+        assert db.runs()[0]["hints_agreed"] is not None
+        new = db.query(
+            "SELECT COUNT(*), COUNT(form) FROM hints h JOIN steps s ON s.id = h.step_id"
+            " WHERE s.run_id = ?",
+            (again,),
+        )[0]
+        assert new[0] == new[1] > 0
+        console = Console(record=True, width=200)
+        show(db, again, Filters(), vs=run, console=console)
+        assert "of them, agreed with a pin" in console.export_text()
 
 
 def test_pass_filter(recorded):
@@ -130,7 +170,8 @@ def test_compare_rule_o_off_then_on(recorded):
     key = ("2100224", "002->003", "completeness")
     assert (und(b[key]), und(a[key])) == (1150, 282)  # test_opcode_flags_pinned_by_one_hot
     assert c.discharged and all(r["was"] == "undecided" for r in c.discharged)
-    assert c.hints and any(r["now"] for r in c.hints)  # the pins let more hints through
+    outcomes = {(r["was"], r["now"]) for r in c.hints}
+    assert ("rejected", "agreed") in outcomes  # the pins let more hints through
 
 
 def test_new_counter_becomes_a_column(tmp_path):
@@ -169,7 +210,7 @@ def test_drop_and_interrupted_runs(tmp_path):
         ({"f": Filters(pass_="solver")}, ["Undecided obligations by reason", "args [", "hints"]),
         ({"f": Filters(reason="linear")}, ["undecided obligations in", "Obligations (first"]),
         ({"f": Filters(pair="013->014")}, ["Undecided obligations by reason", "pair 013->014"]),
-        ({"hints": True}, ["Rejected hints by reason and column family"]),
+        ({"hints": True}, ["Rejected hints by the form of t", "by form: x := c"]),
         ({"vs": "off"}, ["Totals on the shared steps", "Discharged now", "switch one_hot: off -> on"]),
     ],
     ids=["overview", "pass", "reason", "pair", "hints", "vs"],

@@ -167,6 +167,7 @@ def _as_dict(r: Report) -> dict:
         "premises_expanded": r.premises_expanded,
         "premises_split": r.premises_split,
         "hints_accepted": r.hints_accepted,
+        "hints_agreed": r.hints_agreed,
         "hints_rejected": r.hints_rejected,
         "constants_solved": r.constants_solved,
         "pinned": r.pinned,
@@ -194,7 +195,8 @@ def _print(r: Report, verbose: bool) -> None:
     )
     print(
         f"{r.direction}: {status}  ({counts}; {r.premises_expanded} premises expanded, {r.premises_split} split"
-        f"; hints {r.hints_accepted} used, {r.hints_rejected} rejected"
+        f"; hints {r.hints_accepted} used ({r.hints_agreed} agreed with a pin),"
+        f" {r.hints_rejected} rejected"
         f"; {r.constants_solved} constants solved; {r.pinned} pinned)"
     )
     for cols, w in r.mapping.witnesses:

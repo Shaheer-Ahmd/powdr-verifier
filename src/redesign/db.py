@@ -33,7 +33,7 @@ from .circuit import Circuit
 from .sweep import Obligation, Report
 
 DEFAULT_PATH = REPORTS_DIR / "sweeps.db"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3  # 2: hints agreed with a pin; 3: the form of a hint's value
 EXPR_CHARS = 2000  # longer expressions are cut (shapes are not: they are hashed)
 KINDS = {"constraint": "c", "bus": "b"}  # obligation kind -> name prefix ("c17", "b3")
 
@@ -81,6 +81,7 @@ CREATE TABLE IF NOT EXISTS steps (
     premises_expanded INTEGER,
     premises_split INTEGER,
     hints_accepted INTEGER,
+    hints_agreed INTEGER,       -- of the accepted, those equal to a pin; NULL before schema 2
     hints_rejected INTEGER,
     constants_solved INTEGER,
     pinned INTEGER,
@@ -126,6 +127,10 @@ CREATE TABLE IF NOT EXISTS hints (
     accepted INTEGER NOT NULL,
     kind TEXT NOT NULL,         -- the rule that proved it, or why it was rejected
     note TEXT,
+    -- Accepted, but x already had that value (a pin): nothing was substituted.
+    -- NULL before schema 2. Last, as ALTER TABLE adds it to older databases.
+    agreed INTEGER,
+    form TEXT,                  -- t's form (sweep.hint_form); NULL before schema 3
     PRIMARY KEY (step_id, col)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS unmapped (
@@ -154,9 +159,20 @@ class SweepDB:
         if version > SCHEMA_VERSION:
             raise RuntimeError(f"{path} has schema {version}; this code knows {SCHEMA_VERSION}")
         self.con.executescript(SCHEMA)
+        # Older schemas lack these: their runs keep NULL there.
+        for table, col, type_ in (
+            ("steps", "hints_agreed", "INTEGER"),  # schema 2
+            ("hints", "agreed", "INTEGER"),  # schema 2
+            ("hints", "form", "TEXT"),  # schema 3
+        ):
+            if col not in self._columns(table):
+                self.con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {type_}")
         self.con.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-        self._step_columns = {r[1] for r in self.con.execute("PRAGMA table_info(steps)")}
+        self._step_columns = self._columns("steps")
         self._codes = {r["rung"]: r["code"] for r in self.query("SELECT * FROM rung_codes")}
+
+    def _columns(self, table: str) -> set[str]:
+        return {r[1] for r in self.con.execute(f"PRAGMA table_info({table})")}
 
     def __enter__(self) -> Self:
         return self
@@ -288,10 +304,11 @@ class SweepDB:
             "INSERT INTO undecided VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", rows
         )
         self.con.executemany(
-            "INSERT INTO hints VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO hints (step_id, col, family, accepted, agreed, kind, note, form)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             [
-                (step, col, family(col), int(ok), kind, note or None)
-                for col, ok, kind, note in r.hints
+                (step, col, family(col), int(ok), int(agreed), kind, note or None, form)
+                for col, ok, agreed, kind, note, form in r.hints
             ],
         )
         self.con.executemany(
@@ -335,7 +352,7 @@ class SweepDB:
         return self.query(
             "SELECT r.*, COUNT(s.id) AS steps, SUM(s.verified) AS verified,"
             " SUM(s.error IS NOT NULL) AS errors, SUM(s.undecided) AS undecided,"
-            " SUM(s.hints_accepted) AS hints_accepted,"
+            " SUM(s.hints_accepted) AS hints_accepted, SUM(s.hints_agreed) AS hints_agreed,"
             " SUM(s.hints_rejected) AS hints_rejected"
             " FROM runs r LEFT JOIN steps s ON s.run_id = r.id"
             " GROUP BY r.id ORDER BY r.id DESC LIMIT ?",
@@ -349,7 +366,7 @@ class SweepDB:
             "SELECT s.pass, s.direction, MIN(s.nnn) AS first, COUNT(*) AS steps,"
             " SUM(s.verified) AS verified, SUM(s.error IS NOT NULL) AS errors,"
             " SUM(s.unmapped > 0) AS with_unmapped,"
-            " SUM(s.hints_accepted) AS hints_accepted,"
+            " SUM(s.hints_accepted) AS hints_accepted, SUM(s.hints_agreed) AS hints_agreed,"
             " SUM(s.hints_rejected) AS hints_rejected,"
             " SUM(s.pinned) AS pinned, SUM(s.constants_solved) AS constants_solved"
             f" FROM steps s WHERE {where} GROUP BY s.pass, s.direction"
@@ -433,13 +450,26 @@ class SweepDB:
         return r[0], r[1]
 
     def hint_kinds(self, run_id: int, f: Filters, accepted: bool) -> list[sqlite3.Row]:
-        """Hints per (kind, family): why they were rejected (or how accepted)."""
+        """Hints per (kind, family, agreed, form): why rejected, or how accepted."""
         where, params = f.steps(run_id)
         return self.query(
-            "SELECT h.kind, h.family, COUNT(*) AS n, COUNT(DISTINCT h.step_id) AS steps"
+            "SELECT h.kind, h.family, h.agreed, h.form, COUNT(*) AS n,"
+            " COUNT(DISTINCT h.step_id) AS steps"
             " FROM hints h JOIN steps s ON s.id = h.step_id"
-            f" WHERE {where} AND h.accepted = ? GROUP BY h.kind, h.family"
-            " ORDER BY n DESC",
+            f" WHERE {where} AND h.accepted = ?"
+            " GROUP BY h.kind, h.family, h.agreed, h.form ORDER BY n DESC",
+            [*params, int(accepted)],
+        )
+
+    def hint_forms(self, run_id: int, f: Filters, accepted: bool) -> list[sqlite3.Row]:
+        """Hints per (form, kind, agreed), without the column families."""
+        where, params = f.steps(run_id)
+        return self.query(
+            "SELECT h.form, h.kind, h.agreed, COUNT(*) AS n,"
+            " COUNT(DISTINCT h.step_id) AS steps"
+            " FROM hints h JOIN steps s ON s.id = h.step_id"
+            f" WHERE {where} AND h.accepted = ?"
+            " GROUP BY h.form, h.kind, h.agreed ORDER BY n DESC",
             [*params, int(accepted)],
         )
 
@@ -555,14 +585,16 @@ class SweepDB:
             " SUM(b_verified AND NOT a_verified) AS lost FROM shared"
         )[0]
         hints = self.query(
-            "SELECT hb.accepted AS was, ha.accepted AS now, hb.family, COUNT(*) AS n"
+            f"SELECT {_outcome('hb', 'ha')} AS was, {_outcome('ha', 'hb')} AS now,"
+            " COALESCE(ha.form, hb.form) AS form, hb.family, COUNT(*) AS n"
             " FROM shared p JOIN hints hb ON hb.step_id = p.b"
             " JOIN hints ha ON ha.step_id = p.a AND ha.col = hb.col"
-            " WHERE ha.accepted != hb.accepted GROUP BY 1, 2, 3 ORDER BY n DESC"
+            " GROUP BY 1, 2, 3, 4 HAVING was != now ORDER BY n DESC"
         )
         sums = (
             "SUM(s.undecided) AS undecided, SUM(s.verified) AS verified,"
-            " SUM(s.hints_accepted) AS hints_accepted, SUM(s.hints_rejected) AS hints_rejected,"
+            " SUM(s.hints_accepted) AS hints_accepted, SUM(s.hints_agreed) AS hints_agreed,"
+            " SUM(s.hints_rejected) AS hints_rejected,"
             " SUM(s.pinned) AS pinned, SUM(s.constants_solved) AS constants_solved"
         )
         counters = {
@@ -604,7 +636,7 @@ class Comparison:
     totals: tuple[int, int]  # obligations on the shared steps: (run, base)
     discharged: list[dict]  # examples: undecided in base, discharged now
     regressed: list[dict]  # examples: discharged in base, undecided now
-    hints: list  # (was, now, family, n) for hints whose verdict changed
+    hints: list  # (was, now, form, family, n) for hints whose outcome (_outcome) changed
     counters: dict  # "base" / "run" -> summed counters on the shared steps
     step_changes: list  # shared steps whose verified changed
 
@@ -709,6 +741,19 @@ def _counters(r: Report) -> dict[str, int]:
         if type(v) is int and f.name.isidentifier():
             out[f.name] = v
     return out
+
+
+def _outcome(h: str, other: str) -> str:
+    """SQL for hint row ``h``'s outcome: added, agreed or rejected.
+
+    "accepted" when either run predates the agreed bit, so that such runs
+    compare on accepted alone.
+    """
+    return (
+        f"CASE WHEN NOT {h}.accepted THEN 'rejected'"
+        f" WHEN {h}.agreed IS NULL OR {other}.agreed IS NULL THEN 'accepted'"
+        f" WHEN {h}.agreed THEN 'agreed' ELSE 'added' END"
+    )
 
 
 def family(col: str) -> str:

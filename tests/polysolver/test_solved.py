@@ -53,7 +53,7 @@ def test_every_verdict_is_logged():
     no = s.add_solved("x", "b", tag="h:x")
     ok = s.add_solved("x", "a", tag="h:x")
     s.solve_constants()  # nothing to pin, so nothing more is logged
-    assert s.solved_log == [("h:x", no), ("h:x", ok)]
+    assert s.solved_log == [("h:x", no, False), ("h:x", ok, False)]
     assert isinstance(no, Unknown) and isinstance(ok, Implied)
 
 
@@ -70,6 +70,7 @@ def test_solved_once():
     assert isinstance(s.add_solved("x", "a", tag="h1"), Implied)
     v = s.add_solved("x", "a", tag="h2")
     assert v.rule == "trivial" and s.solved_count == 1 and s.solved_accepted == 2
+    assert s.solved_agreed == 1 and [a for _, _, a in s.solved_log] == [False, True]
     v = s.add_solved("x", "b", tag="h3")
     assert isinstance(v, Unknown) and v.kind == "already-solved"
     assert s.implies(sub("x", "a")).solved == ("h1",)
