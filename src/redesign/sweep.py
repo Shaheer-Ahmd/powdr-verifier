@@ -130,8 +130,9 @@ class Report:
     hints_accepted: int = 0  # solved equations PolySolver checked and kept
     hints_agreed: int = 0  # of those, equal to a value x already had (a pin): no substitution
     hints_rejected: int = 0  # hints whose check failed (not used)
-    constants_solved: int = 0  # premises that pinned a variable (solve_constants)
-    pinned: int = 0  # variables pinned by collapsed ranges (solve_one_hot)
+    constants_solved: int = 0  # variables pinned by a premise x - c (derive)
+    pinned: int = 0  # variables pinned otherwise: booleanity, groups, selectors (derive)
+    pinned_after_hints: int = 0  # of both, those pinned by the run after the hints
     # powdr's hints, in the order tried: (column, accepted, agreed with x's
     # value, rule or reject kind, note, form of t: hint_form).
     hints: list[tuple[str, bool, bool, str, str, str | None]] = field(default_factory=list)
@@ -317,7 +318,8 @@ def sweep(
     report.premises_split = solver.premises_split
     report.constants_solved = solver.constants_solved
     report.pinned = solver.pinned
-    report.hints_accepted = solver.solved_accepted - solver.constants_solved
+    report.pinned_after_hints = sum(solver.derive_pins[1:])
+    report.hints_accepted = solver.solved_accepted
     report.hints_rejected = solver.solved_rejected
     forms = {x: hint_form(t) for x, t in hints}
     report.hints = [

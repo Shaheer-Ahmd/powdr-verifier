@@ -16,16 +16,15 @@ equations to try and in what order (e.g. the substitutions powdr recorded);
 the solver only checks them. Defs differ: they name fresh variables, so they
 need no check, and no premise can mention them.
 
-The solver finds equations by itself only when the caller asks, in two ways.
-solve_constants: a premise that, under the solved equations, mentions one
-variable linearly pins it; each such equation goes through add_solved.
-solve_one_hot: ranges derived from the premises (below). A range whose bounds
-meet (lo = hi), derived or given, says x = lo; it follows from trusted
-premises and ranges, so x is replaced by lo at once, without a check.
+The solver finds equations by itself only when the caller asks: derive()
+reads domains (a range, or a set of values) off the premises. A domain with
+one value left, derived or given, says x = v; it follows from trusted
+premises and ranges, so x is replaced by v at once, without a check (a pin).
 
-One-hot pass (solve_one_hot). Each step is sound on its own:
-- B: a premise that reduces to x^2 - x gives 0 <= x <= 1 (F_p has no zero
-  divisors).
+derive() steps, each sound on its own:
+- Domain: a premise that mentions one variable x, and whose top-level factors
+  are each a nonzero constant or a*x + b, says x is one of the -b/a (F_p has
+  no zero divisors): x - c pins x, x(x - 1) gives {0, 1}.
 - G: a premise x_1 + ... + x_n - c with c in {0, 1} and every x_i in [0, 1].
   As n < p, the integer sum is c: with c = 0 every x_i is 0, a single member
   is c, and otherwise exactly one x_i is 1 (a group).
@@ -47,6 +46,7 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
 from . import poly as P
 from .defs import NO_DEFS, Defs, InvalidDefs, Opaque
@@ -83,6 +83,15 @@ class Unknown:
 Verdict = Implied | Unknown
 
 
+class _Domain(NamedTuple):
+    """What is known of a variable: lo <= x <= hi, and x is one of ``values`` if given."""
+
+    lo: int
+    hi: int
+    values: frozenset[int] | None  # a finite set; lo and hi are then its min and max
+    tags: list[str]  # the premises and ranges it rests on
+
+
 @dataclass
 class _Premise:
     """One premise, kept as given. Its expansion is computed only when needed."""
@@ -95,9 +104,13 @@ class _Premise:
     version: int = 0
     key: P.Key | None = None  # zero key; None until computed, or if too big
     expanded: bool = False  # True once we tried to compute the key
-    # Rule S's view, computed on first use: the top-level factors as written,
-    # their expansions (filled in only as needed), and which ones are sums.
+    kvars: set | None = None  # the variables of key
+    # The top-level factors as written, their expansions (filled in only as
+    # needed), and which ones are sums (rule S). The factors and their
+    # variables are syntax, so they never go stale.
     factors: list | None = None  # the expressions of the top-level * chain
+    factor_vars: list | None = None  # the variables of each factor, as written
+    written_vars: set | None = None  # all of them
     polys: dict = field(default_factory=dict)  # factor position -> Poly (or None)
     sums: list | None = None  # [(factor position, Poly)] for the linear sums
 
@@ -111,16 +124,21 @@ class PolySolver:
         declared: Iterable[str],
         p: int = BABYBEAR,
         max_terms: int = P.MAX_TERMS,
+        constants: bool = True,
+        one_hot: bool = True,
     ):
         self.table = table
         self.p = p
         self.max_terms = max_terms
+        # derive()'s steps: pins from x - c, and the rest (domains of several
+        # values, G and Sel).
+        self._use_constants, self._use_one_hot = constants, one_hot
         self.declared: frozenset[Var] = frozenset(table.var(n) for n in declared)
         self._premises: list[_Premise] = []
         # Premise index for rule N: variable -> ids of the premises that mention it.
         # Built from the syntax alone, so adding a premise costs no expansion.
         self._by_var: dict[Var, list[int]] = defaultdict(list)
-        self._ranges: dict[Var, tuple[int, int, list[str]]] = {}  # v -> (lo, hi, tags)
+        self._domains: dict[Var, _Domain] = {}
         # Verdict caches, keyed by the query's zero key. Implied stays true as
         # premises grow; Unknown may not, so that cache is cleared on every add.
         self._implied: dict[P.Key, Implied] = {}
@@ -134,20 +152,23 @@ class PolySolver:
         # May list a few extra after cancellations; that costs only time.
         self._occurs_in: dict[Var, set[Var]] = defaultdict(set)
         self._version = 0  # bumped on every substitution; stales premise caches
-        # One-hot pass: the premises that are groups, and variable -> its groups.
-        self._groups: set[int] = set()
+        # derive(): variable -> the groups (premise ids) it is a member of.
         self._group_index: dict[Var, set[int]] = defaultdict(set)
-        self._collapsed: list[Var] = []  # ranges with lo = hi, not yet substituted
-        # solve_one_hot's work list, only while it runs.
+        self._collapsed: list[Var] = []  # domains with one value, not yet substituted
+        self._constant_pins: set[Var] = set()  # collapsed by a domain step from x - c
+        # derive()'s work list while it runs; between runs, what the next one
+        # must look at (new premises, and those that ranges or hints changed).
         self._queue: deque[int] | None = None
         self._queued: set[int] = set()
+        self._pending: set[int] = set()
         self.premises_expanded = 0  # premise keys computed (rule N)
         self.premises_split = 0  # premises split into factors (rule S)
         self.solved_accepted = 0  # add_solved calls accepted (also values equal to a pin)
         self.solved_agreed = 0  # of those, x already had that value: nothing changed
         self.solved_rejected = 0  # add_solved calls whose check failed
-        self.constants_solved = 0  # equations added by solve_constants
-        self.pinned = 0  # variables replaced because their range collapsed
+        self.constants_solved = 0  # variables pinned by a premise x - c
+        self.pinned = 0  # variables pinned otherwise (a collapsed domain)
+        self.derive_pins: list[int] = []  # variables pinned by each derive() call
         # (tag, verdict, agreed with x's value) per add_solved call
         self.solved_log: list[tuple[str, Verdict, bool]] = []
 
@@ -163,6 +184,7 @@ class PolySolver:
         # and rule S expand a premise only when a query first needs it.
         for v in vs:
             self._by_var[v].append(idx)
+        self._pending.add(idx)  # for the next derive()
         self._unknown.clear()  # an earlier Unknown might now be provable
 
     def add_range(self, x: str, lo: int, hi: int, tag: str) -> None:
@@ -173,7 +195,7 @@ class PolySolver:
         if not 0 <= lo <= hi < self.p:
             raise ValueError(f"bad range [{lo}, {hi}] for {x}")
         (v,) = self._declared_vars(x, "range")
-        self._reduce_range(v, lo, hi, [tag])
+        self._reduce_domain(v, lo, hi, [tag])
         self._substitute_collapsed()
 
     def add_solved(self, x: str, t: Expr, tag: str) -> Verdict:
@@ -184,7 +206,7 @@ class PolySolver:
         the rules see them), in earlier solved equations and in all later
         queries. On Unknown nothing changes: the equation is rejected, which
         costs completeness only. If x is already solved (e.g. pinned by
-        solve_one_hot), the query compares its value with t, and an Implied
+        derive), the query compares its value with t, and an Implied
         verdict also changes nothing. Every verdict goes into ``solved_log``,
         with whether it agreed with a value x already had.
         """
@@ -227,8 +249,11 @@ class PolySolver:
 
         Earlier solved values that mention x get x replaced too, so every value
         stays free of solved variables. They are all computed before anything
-        changes, so an expansion limit leaves no trace.
+        changes, so an expansion limit leaves no trace. The premises that
+        mention x read differently now, so derive() looks at them again.
         """
+        # Taken before x is replaced: afterwards _occurs_in no longer lists it.
+        again = self._mentioning(xv)
 
         def by_rhs(v: Var) -> P.Poly | None:
             return rhs if v == xv else None
@@ -248,103 +273,86 @@ class PolySolver:
             self._occurs_in[v].add(xv)
         self._version += 1  # premise keys and splits are now stale
         self._unknown.clear()  # an earlier Unknown might now be provable
+        self._enqueue(again)
 
-    def _reduce_range(self, v: Var, lo: int, hi: int, tags: list[str]) -> bool:
-        """Intersect v's range with [lo, hi]; True if that narrowed it.
+    def _reduce_domain(
+        self,
+        v: Var,
+        lo: int,
+        hi: int,
+        tags: list[str],
+        values: frozenset[int] | None = None,
+    ) -> bool:
+        """Intersect v's domain with [lo, hi] and ``values``; True if that narrowed it.
 
         An empty intersection means the premises contradict each other; the
-        range is then left as it was. When the bounds meet, v is queued for
+        domain is then left as it was. When one value is left, v is queued for
         _substitute_collapsed (the listener).
         """
-        old_hi = None
-        if v in self._ranges:
-            # Both ranges hold, so v lies in their intersection.
-            old_lo, old_hi, old_tags = self._ranges[v]
-            new_lo, new_hi = max(lo, old_lo), min(hi, old_hi)
-            if new_lo > new_hi or (new_lo, new_hi) == (old_lo, old_hi):
-                return False
-            lo, hi, tags = new_lo, new_hi, old_tags + tags
-        self._ranges[v] = (lo, hi, list(tags))
+        old = self._domains.get(v)
+        if old is not None:
+            # Both hold, so v lies in their intersection.
+            lo, hi, tags = max(lo, old.lo), min(hi, old.hi), old.tags + tags
+            if old.values is not None:
+                values = old.values if values is None else old.values & values
+        if values is not None:
+            values = frozenset(x for x in values if lo <= x <= hi)
+            if values:
+                lo, hi = min(values), max(values)
+        if lo > hi or values == frozenset():
+            return False
+        if old is not None and (lo, hi, values) == old[:3]:
+            return False
+        self._domains[v] = _Domain(lo, hi, values, list(tags))
         self._unknown.clear()
-        if hi <= 1 and (old_hi is None or old_hi > 1):
+        if hi <= 1 and (old is None or old.hi > 1):
             self._requeue_vars([v])  # newly in [0, 1]: a premise over v may be a group now
         if lo == hi and v not in self._solved:
             self._collapsed.append(v)
         return True
 
     def _substitute_collapsed(self) -> None:
-        """Replace every variable whose range collapsed to one value by that value."""
+        """Replace every variable whose domain collapsed to one value by that value."""
         while self._collapsed:
             v = self._collapsed.pop()
             if v in self._solved:
                 continue
-            lo, _, tags = self._ranges[v]
-            # Taken before v is replaced: afterwards _occurs_in no longer lists it.
-            again = self._mentioning(v) if self._queue is not None else ()
-            self._substitute(v, P.const(lo, self.p), tuple(dict.fromkeys(tags)))
-            self.pinned += 1
-            self._enqueue(again)
-
-    def solve_constants(self) -> int:
-        """Solve every premise that pins one variable to a constant; return how many.
-
-        A premise that, under the solved equations, is c*x + k (one variable,
-        degree 1, c a nonzero constant) gives x := -k/c. Each new constant can
-        turn more premises into such pins (pc1 - pc0 - 4 once pc0 is known), so
-        the premises that mention x are looked at again, until none gives a new
-        one. Like z3's solve-eqs restricted to constant values, but only when the
-        caller asks. Every equation goes through add_solved, so it is checked
-        like any other; the premise it came from is its tag.
-        """
-        added = 0
-        todo = list(range(len(self._premises)))
-        queued = set(todo)
-        while todo:
-            i = todo.pop()
-            queued.discard(i)
-            pin = self._as_pin(self._premise_key(i))
-            if pin is None:
-                continue
-            xv, value = pin
-            x = self.table.name(xv)
-            # Look again at what mentions x, computed before x is replaced.
-            again = self._mentioning(xv)
-            if isinstance(self.add_solved(x, value, tag=self._premises[i].tag), Implied):
-                added += 1
+            d = self._domains[v]
+            self._substitute(v, P.const(d.lo, self.p), tuple(dict.fromkeys(d.tags)))
+            if v in self._constant_pins:
                 self.constants_solved += 1
-                for j in again:
-                    if j not in queued:
-                        queued.add(j)
-                        todo.append(j)
-        return added
+            else:
+                self.pinned += 1
 
-    def solve_one_hot(self) -> int:
-        """Derive ranges by steps B, G and Sel (module docstring); return how many pinned.
+    def derive(self) -> int:
+        """Derive domains by the steps in the module docstring; return how many pinned.
 
         A work list: every premise is looked at once, then again whenever
-        something it depends on changes: one of its variables gets a range
-        within [0, 1], joins a group, or is replaced by its value. Ranges only
-        shrink and a variable is replaced at most once, so the list runs empty,
-        and then no premise can give anything new. A premise is expanded only
-        if its variables, as it reads now, could fit a step: one variable (B),
-        or all of them within [0, 1] (G, Sel). Expansion never adds variables,
-        so only a cancellation can hide a step from this screen.
+        something it depends on changes: one of its variables gets a domain
+        within [0, 1], joins a group, or is replaced by its value. Between
+        calls, ranges and hints queue the premises they change for the next
+        one. Domains only shrink and a variable is replaced at most once, so
+        the list runs empty, and then no premise can give anything new. A
+        premise is expanded only if its variables, as it reads now, could fit
+        a step: one variable (domain), or all of them within [0, 1] (G, Sel);
+        _step_vars says when they are read off the key instead.
         """
-        before = self.pinned
-        n = len(self._premises)
+        before = self.pinned + self.constants_solved
+        todo, self._pending = sorted(self._pending), set()
         self._queue, self._queued = deque(), set()
         try:
             # One-variable premises first: they hold the x^2 - x that G needs.
-            self._enqueue(i for i in range(n) if len(self._premises[i].vars) == 1)
-            self._enqueue(range(n))
+            self._enqueue(i for i in todo if len(self._premises[i].vars) == 1)
+            self._enqueue(todo)
             while self._queue:
                 i = self._queue.popleft()
                 self._queued.discard(i)
-                self._one_hot_step(i)
+                self._step(i)
                 self._substitute_collapsed()
         finally:
             self._queue = None
-        return self.pinned - before
+        self.derive_pins.append(self.pinned + self.constants_solved - before)
+        return self.derive_pins[-1]
 
     @staticmethod
     def _as_pin(k: P.Key | None) -> tuple[Var, int] | None:
@@ -547,8 +555,8 @@ class PolySolver:
         """Drop the premise's derived data if solved equations changed since."""
         if prem.version != self._version:
             prem.version = self._version
-            prem.key, prem.expanded = None, False
-            prem.factors, prem.polys, prem.sums = None, {}, None
+            prem.key, prem.expanded, prem.kvars = None, False, None
+            prem.polys, prem.sums = {}, None
         return prem
 
     def _premise_key(self, i: int) -> P.Key | None:
@@ -565,6 +573,25 @@ class PolySolver:
                 prem.key = None  # too big: this premise never matches
         return prem.key
 
+    def _premise_vars(self, i: int) -> set[Var]:
+        """The variables of the premise's key; empty if it has none or is too big."""
+        prem = self._fresh(self._premises[i])
+        if prem.kvars is None:
+            k = self._premise_key(i)
+            prem.kvars = P.key_vars(k) if k else set()
+        return prem.kvars
+
+    def _premise_factors(self, i: int) -> list:
+        """The premise's top-level factors as written, computed once."""
+        prem = self._premises[i]
+        if prem.factors is None:
+            prem.factors = product_factors(prem.expr)
+            prem.factor_vars = [
+                {self._var(n) for n in variables(f)} for f in prem.factors
+            ]
+            prem.written_vars = set().union(*prem.factor_vars)
+        return prem.factors
+
     # ------------------------------------------------------------ rule S
 
     def _premise_sums(self, i: int) -> list:
@@ -577,11 +604,11 @@ class PolySolver:
         prem = self._fresh(self._premises[i])
         if prem.sums is None:
             self.premises_split += 1
-            prem.factors = product_factors(prem.expr)
+            self._premise_factors(i)
             prem.sums = []
-            for fi, f in enumerate(prem.factors):
+            for fi in range(len(prem.factors)):
                 # Expansion never adds variables, so fewer than 2 means never a sum.
-                if len(variables(f)) < 2:
+                if len(prem.factor_vars[fi]) < 2:
                     continue
                 poly = self._factor_poly(prem, fi)
                 # Linear with no constant: every term is one variable to the power 1.
@@ -612,7 +639,7 @@ class PolySolver:
         """
         notes, kind = [], "no-match"
         for a in sorted(P.key_vars(k)):
-            if a not in self._ranges:  # an unranged a can never pass the bound
+            if a not in self._domains:  # an unranged a can never pass the bound
                 continue
             # A premise whose sum contains a mentions a, directly or through a
             # solved value, so _mentioning finds every candidate (as in rule N).
@@ -661,7 +688,7 @@ class PolySolver:
     def _no_wrap(self, s: P.Poly) -> tuple[str, str] | None:
         """(kind, message) saying why the sum ``s`` might wrap past p, or None."""
         # Every summand needs an upper bound, or the sum could be anything.
-        missing = [self.table.name(v) for ((v, _),) in s if v not in self._ranges]
+        missing = [self.table.name(v) for ((v, _),) in s if v not in self._domains]
         if missing:
             return "nowrap-missing-range", f"no range for {', '.join(sorted(missing))}"
         # With 0 <= a_i <= hi_i the integer sum is at most sum c_i * hi_i. If that
@@ -672,26 +699,24 @@ class PolySolver:
         # monic in each of its terms, and keep the smallest bound.
         scales = {1, self.p - 1} | {pow(c, self.p - 2, self.p) for c in s.values()}
         bound = min(
-            sum(c * k % self.p * self._ranges[v][1] for ((v, _),), c in s.items())
+            sum(c * k % self.p * self._domains[v].hi for ((v, _),), c in s.items())
             for k in scales
         )
         if bound >= self.p:
             return "nowrap-bound", f"sum of c_i * hi_i is {bound} >= p"
         return None
 
-    # ------------------------------------------------------------ one-hot pass
+    # ------------------------------------------------------------ derive
 
-    def _one_hot_step(self, i: int) -> None:
-        """Steps B, G and Sel for premise i, as it reads under the solved equations."""
-        vs = self._current_vars(i)
-        if not vs or (len(vs) > 1 and not all(self._in_01(v) for v in vs)):
+    def _step(self, i: int) -> None:
+        """The domain step, G and Sel for premise i, as it reads under the solved equations."""
+        vs = self._step_vars(i)
+        if len(vs) == 1:
+            self._domain_step(i, *vs)
             return
-        k = self._premise_key(i)
-        x = self._boolean_var(k)
-        if x is not None:
-            self._reduce_range(x, 0, 1, self._premise_tags(i))
+        if not vs or not self._use_one_hot or not all(self._in_01(v) for v in vs):
             return
-        lin = self._linear(k)
+        lin = self._linear(self._premise_key(i))
         if lin is None or not lin[0]:
             return
         w, c0 = lin
@@ -699,16 +724,75 @@ class PolySolver:
             tags = self._premise_tags(i) + self._range_tags(w)
             if c0 == 0:  # no member is on
                 for x in w:
-                    self._reduce_range(x, 0, 0, tags)
+                    self._reduce_domain(x, 0, 0, tags)
             elif len(w) == 1:  # the one member left is on
                 (x,) = w
-                self._reduce_range(x, 1, 1, tags)
-            elif i not in self._groups:
-                self._groups.add(i)
-                for x in w:
+                self._reduce_domain(x, 1, 1, tags)
+            else:
+                # Every member, also one a hint has swapped in since the last look.
+                new = [x for x in w if i not in self._group_index[x]]
+                for x in new:
                     self._group_index[x].add(i)
-                self._requeue_vars(w)  # their selectors can use this group now
+                self._requeue_vars(new)  # their selectors can use this group now
         self._narrow_by_selector(i, w, c0)
+
+    def _step_vars(self, i: int) -> set[Var]:
+        """The variables premise i mentions under the solved equations.
+
+        Read off the syntax, unless the premise mentions a variable solved to
+        a non-constant value (a hint): that can cancel a variable, as in
+        y + x - a - 3 with x := a, so then they are read off its key.
+        """
+        if any(any(self._solved.get(v, ())) for v in self._premises[i].vars):
+            return self._premise_vars(i)
+        return self._current_vars(i)
+
+    def _domain_step(self, i: int, x: Var) -> None:
+        """Premise i mentions only x: x is one of its roots."""
+        roots = self._factor_roots(i, x)
+        if roots is None:
+            # Not linear factors as written (x*x - x, or a cancellation): the key.
+            k = self._premise_key(i)
+            pin = self._as_pin(k)
+            if pin is not None and pin[0] == x:
+                roots = (pin[1] % self.p,)
+            elif self._boolean_var(k) == x:
+                roots = (0, 1)
+            else:
+                return
+        # Without the constants step, one value is still used for a variable
+        # in [0, 1]: that is what G and Sel decided from such a premise.
+        if len(roots) == 1:
+            if not (self._use_constants or self._use_one_hot and self._in_01(x)):
+                return
+        elif not self._use_one_hot:
+            return
+        values = frozenset(roots)
+        tags = self._premise_tags(i)
+        if self._reduce_domain(x, min(values), max(values), tags, values) and len(roots) == 1:
+            self._constant_pins.add(x)  # counted as a constant, not a one-hot pin
+
+    def _factor_roots(self, i: int, x: Var) -> tuple[int, ...] | None:
+        """The roots -b/a if each factor of premise i is a nonzero constant or a*x + b."""
+        self._premise_factors(i)
+        prem = self._fresh(self._premises[i])
+        # From the syntax first: a factor that mentions another unsolved
+        # variable still does after solving (short of a cancellation).
+        for vs in prem.factor_vars:
+            if any(y != x and y not in self._solved for y in vs):
+                return None
+        lin = ((x, 1),)
+        roots = set()
+        for fi in range(len(prem.factors)):
+            f = self._factor_poly(prem, fi)
+            if not f:
+                return None  # 0, so the premise says nothing (or too big)
+            if f.keys() <= {()}:
+                continue  # a nonzero constant
+            if not f.keys() <= {(), lin}:
+                return None
+            roots.add(-f.get((), 0) * pow(f[lin], self.p - 2, self.p) % self.p)
+        return tuple(sorted(roots)) or None  # no linear factor: never 0
 
     def _narrow_by_selector(self, i: int, w: dict[Var, int], c0: int) -> None:
         """Step Sel: premise i, c0 + sum w_x * x, over the members of a group."""
@@ -728,9 +812,9 @@ class PolySolver:
             tags += self._range_tags(members)
             for x in members:
                 if x not in on:
-                    self._reduce_range(x, 0, 0, tags)
+                    self._reduce_domain(x, 0, 0, tags)
             if len(on) == 1:
-                self._reduce_range(on[0], 1, 1, tags)
+                self._reduce_domain(on[0], 1, 1, tags)
 
     def _is_group(self, w: dict[Var, int], c0: int) -> bool:
         """Unit weights, constant 0 or -1 (a sum of 0 or 1), every member in [0, 1]."""
@@ -741,7 +825,7 @@ class PolySolver:
         )
 
     def _in_01(self, v: Var) -> bool:
-        return v in self._ranges and self._ranges[v][1] <= 1
+        return v in self._domains and self._domains[v].hi <= 1
 
     def _premise_tags(self, i: int) -> list[str]:
         """Premise i's tag and those of the solved equations that rewrite it."""
@@ -749,7 +833,7 @@ class PolySolver:
         return [prem.tag, *self._solved_tags(prem.vars)]
 
     def _range_tags(self, vs: Iterable[Var]) -> list[str]:
-        return [t for v in vs for t in self._ranges[v][2]]
+        return [t for v in vs for t in self._domains[v].tags]
 
     def _boolean_var(self, k: P.Key | None) -> Var | None:
         """x if the key is x^2 - x, else None."""
@@ -785,8 +869,9 @@ class PolySolver:
         return out
 
     def _enqueue(self, ids: Iterable[int]) -> None:
-        """Queue premises for solve_one_hot; nothing outside it."""
+        """Queue premises for derive(); outside it, keep them for the next call."""
         if self._queue is None:
+            self._pending.update(ids)
             return
         for i in ids:
             if i not in self._queued:
@@ -794,9 +879,7 @@ class PolySolver:
                 self._queue.append(i)
 
     def _requeue_vars(self, vs: Iterable[Var]) -> None:
-        """Queue every premise that mentions one of ``vs``; nothing outside solve_one_hot."""
-        if self._queue is None:
-            return
+        """Queue every premise that mentions one of ``vs`` (see _enqueue)."""
         for v in vs:
             self._enqueue(self._mentioning(v))
 

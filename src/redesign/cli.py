@@ -43,12 +43,12 @@ def _build_parser() -> argparse.ArgumentParser:
     c.add_argument(
         "--no-constants",
         action="store_true",
-        help="do not solve premises that pin a variable to a constant",
+        help="do not pin a variable from a premise x - c",
     )
     c.add_argument(
         "--no-one-hot",
         action="store_true",
-        help="skip the one-hot pass (booleanity ranges, flag pins)",
+        help="derive no booleanity or other multi-value domains, no flag pins",
     )
     c.add_argument("--root", type=Path, help="dump root (default: powdr-dumps)")
     c.add_argument("--json", action="store_true", help="machine-readable output")
@@ -67,12 +67,12 @@ def _build_parser() -> argparse.ArgumentParser:
     s.add_argument(
         "--no-constants",
         action="store_true",
-        help="do not solve premises that pin a variable to a constant",
+        help="do not pin a variable from a premise x - c",
     )
     s.add_argument(
         "--no-one-hot",
         action="store_true",
-        help="skip the one-hot pass (booleanity ranges, flag pins)",
+        help="derive no booleanity or other multi-value domains, no flag pins",
     )
     s.add_argument(
         "--pass",

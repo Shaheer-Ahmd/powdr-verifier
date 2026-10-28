@@ -91,12 +91,15 @@ def test_hint_verdicts_match_the_counters(recorded):
     key = ("2100224", "002->003", "completeness")
     s = _steps(db, run)[key]
     assert (s["hints_accepted"], s["hints_rejected"]) == (6339, 4564)  # test_opcode_flags_...
-    assert s["hints_agreed"] == s["pinned"] == 3216  # every pin has a hint that agrees
-    assert _steps(db, off)[key]["hints_agreed"] == 0  # no pins, nothing to agree with
+    # Every pin has a hint that agrees: one-hot pins and constants (x - c), both
+    # derived before the hints.
+    assert s["hints_agreed"] == s["pinned"] + s["constants_solved"] == 6165
+    o = _steps(db, off)[key]
+    assert o["hints_agreed"] == o["constants_solved"] == 4111 and o["pinned"] == 0
     # Rejected there: the load/store and shift constants, and the write_data copies.
-    rejected = {
-        r["form"]: r["n"] for r in db.hint_forms(run, Filters(pair="002->003"), accepted=False)
-    }
+    rejected = Counter()
+    for r in db.hint_forms(run, Filters(pair="002->003"), accepted=False):
+        rejected[r["form"]] += r["n"]  # summed over the reject kinds
     assert rejected == {"c": 3564, "y": 1000}
 
 
