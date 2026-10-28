@@ -73,7 +73,7 @@ def test_xor_instance():
 
 def test_nothing_without_the_pass():
     s = alu(2, run=False)
-    assert s.pinned == 0 and not s._ranges
+    assert s.pinned == 0 and not s._domains
     assert isinstance(s.implies(sub("xor", 1)), Unknown)
 
 
@@ -102,7 +102,7 @@ def test_tied_weights():
     s = alu(2, weights={"sub": 1, "xor": 2, "or": 2, "and": 4})
     assert pins(s) == {"add": 0, "sub": 0, "and": 0}
     for x in ["xor", "or"]:
-        assert s._ranges[s.table.var(x)][:2] == (0, 1)
+        assert s._domains[s.table.var(x)][:2] == (0, 1)
         assert isinstance(s.implies(x), Unknown)
     assert s.implies(sub(add("xor", "or"), 1)).rule == "normalize"  # the sum, reduced
 
@@ -140,7 +140,7 @@ def test_member_not_boolean():
     premises = [(f"b_{x}", boolean(x)) for x in FLAGS[:-1]]
     premises += [("sum", sub(add(*FLAGS), 1)), ("sel", selector(WEIGHTS, 2))]
     s = solver(FLAGS, premises)
-    assert s.pinned == 0 and s.table.var("and") not in s._ranges
+    assert s.pinned == 0 and s.table.var("and") not in s._domains
 
 
 @pytest.mark.parametrize("ternary", [False, True])
@@ -156,7 +156,7 @@ def test_ternary_flag_is_not_boolean(ternary):
 def test_contradiction_is_not_used():
     # The selectors ask for code 2 and code 3 at once: no flag can be on.
     s = alu(2, extra=[selector(WEIGHTS, 3)])
-    assert all(lo <= hi for lo, hi, _ in s._ranges.values())
+    assert all(lo <= hi for lo, hi, *_ in s._domains.values())
 
 
 def test_premise_order_does_not_matter():
@@ -240,8 +240,22 @@ def test_collapsed_range_is_substituted():
 def test_contradicting_range_is_ignored():
     s = solver(["x"], [], ranges=[("x", 0, 0)], run=False)
     s.add_range("x", 1, 1, tag="r2")
-    assert s._ranges[s.table.var("x")][:2] == (0, 0)
+    assert s._domains[s.table.var("x")][:2] == (0, 0)
     assert pins(s) == {"x": 0}
+
+
+def test_domains_only_intersect():
+    s = solver(["x"], [], ranges=[("x", 0, 10)], run=False)
+    x = s.table.var("x")
+    # A set filtered by the range; its bounds are its min and max.
+    assert s._reduce_domain(x, 0, s.p - 1, ["s"], values=frozenset({1, 5, 20}))
+    assert s._domains[x][:3] == (1, 5, frozenset({1, 5}))
+    assert not s._reduce_domain(x, 0, 10, ["t"])  # nothing new
+    assert not s._reduce_domain(x, 0, 10, ["t"], values=frozenset({7}))  # contradiction: kept
+    # A range filters the set too, down to one value.
+    assert s._reduce_domain(x, 2, 10, ["u"])
+    assert s._domains[x] == (5, 5, frozenset({5}), ["r_x", "s", "u"])
+    assert s._collapsed == [x]
 
 
 def test_rule_s_uses_booleanity_ranges():
