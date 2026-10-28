@@ -1,4 +1,4 @@
-"""solve_one_hot: booleanity ranges, flag groups and selectors pin flags; collapsed ranges are substituted."""
+"""derive(): domains, flag groups and selectors pin flags; collapsed domains are substituted."""
 from functools import reduce
 
 import pytest
@@ -35,15 +35,15 @@ def selector(weights, k):
     return sub(add(*[mul(w, x) for x, w in weights.items()]), k)
 
 
-def solver(names, premises, ranges=(), run=True):
-    """Premises tagged by name, then ranges, then the one-hot pass."""
-    s = PolySolver(VarTable(), declared=names)
+def solver(names, premises, ranges=(), run=True, **kw):
+    """Premises tagged by name, then ranges, then derive()."""
+    s = PolySolver(VarTable(), declared=names, **kw)
     for tag, e in premises:
         s.add_premise(e, tag=tag)
     for x, lo, hi in ranges:
         s.add_range(x, lo, hi, tag=f"r_{x}")
     if run:
-        s.solve_one_hot()
+        s.derive()
     return s
 
 
@@ -145,7 +145,7 @@ def test_member_not_boolean():
 
 @pytest.mark.parametrize("ternary", [False, True])
 def test_ternary_flag_is_not_boolean(ternary):
-    # f(f-1)(f-2) gives f no range, so f + g - 1 is not a group.
+    # f(f-1)(f-2) gives f {0, 1, 2}, not [0, 1], so f + g - 1 is not a group.
     f_is = mul("f", sub("f", 1), sub("f", 2)) if ternary else boolean("f")
     premises = [("f_is", f_is), ("b_g", boolean("g"))]
     premises += [("sum", sub(add("f", "g"), 1)), ("sel", sub(add("f", mul(2, "g")), 2))]
@@ -270,3 +270,73 @@ def test_agreeing_hint_is_implied():
     assert isinstance(s.add_solved("xor", 1, tag="h"), Implied)
     v = s.add_solved("xor", 0, tag="h")
     assert isinstance(v, Unknown) and v.kind == "already-solved"
+
+
+# ---------------------------------------------------------------- the domain step
+
+HALF = (P + 1) // 2  # 1/2 in F_p
+
+
+def values(s, x):
+    d = s._domains.get(s.table.var(x))
+    return d and d.values
+
+
+def ternary(x):
+    """x * ((x - 1) * (x - 2)), nested as OpenVM writes it."""
+    return [x, "*", [sub(x, 1), "*", sub(x, 2)]]
+
+
+def test_domains_from_written_factors():
+    s = solver(["f", "c", "x"], [
+        ("t_f", ternary("f")), ("c2", mul("c", sub("c", 255))), ("x", sub(mul(3, "x"), 6)),
+    ])
+    assert values(s, "f") == {0, 1, 2} and values(s, "c") == {0, 255}
+    assert pins(s) == {"x": 2} and s.constants_solved == 1 and s.pinned == 0
+
+
+def test_gated_domain_once_the_gate_is_pinned():
+    s = solver(["e", "g"], [("t", mul("e", ternary("g"))), ("e", sub("e", 1))])
+    assert values(s, "g") == {0, 1, 2}
+    # A gate pinned to 0 makes the premise say nothing.
+    s = solver(["e", "g"], [("t", mul("e", ternary("g"))), ("e", "e")])
+    assert pins(s) == {"e": 0} and values(s, "g") is None
+
+
+def test_is_load_domain_after_its_pins():
+    # OpenVM's assert_tern(t) with t = mem_as + 2*is_load - 2*is_valid: once
+    # mem_as = 2 and is_valid = 1 are pinned, t = 2*is_load.
+    t = sub(add("mem_as", mul(2, "is_load")), mul(2, "is_valid"))
+    s = solver(["mem_as", "is_load", "is_valid"], [
+        ("tern", mul(t, sub(t, 1), sub(t, 2))), ("as", sub("mem_as", 2)), ("valid", sub(1, "is_valid")),
+    ])
+    assert pins(s) == {"mem_as": 2, "is_valid": 1}
+    assert values(s, "is_load") == {0, HALF, 1}
+    assert s._domains[s.table.var("is_load")].hi == HALF  # what rule S reads
+
+
+def test_rule_s_reads_a_set_bound():
+    premises = [("t_f", ternary("f")), ("b_b", boolean("b")), ("g_sum", mul("g", add("f", "b")))]
+    v = solver(["f", "b", "g"], premises).implies(mul("g", "f"))
+    assert v.rule == "nowrap-split" and v.ranges == ("b", "f")
+
+
+def test_without_constants_a_flag_still_gets_its_value():
+    # x - 7 is left alone, but f - 1 on a boolean f is what G did before. It is
+    # looked at before f(f - 1), and again once f is in [0, 1].
+    premises = [("f", sub("f", 1)), ("b_f", boolean("f")), ("x", sub("x", 7))]
+    assert pins(solver(["f", "x"], premises, constants=False)) == {"f": 1}
+    assert pins(solver(["f", "x"], premises, one_hot=False)) == {"f": 1, "x": 7}
+
+
+def test_hint_swaps_a_group_member():
+    # The group a + b + x - 1 gets c in place of x from the hint x := c. Only
+    # then can the selector b + 2c - 2 use it: c is on.
+    premises = [(f"b_{x}", boolean(x)) for x in "abcx"]
+    premises += [("sum", sub(add("a", "b", "x"), 1)), ("eq", sub("x", "c")),
+                 ("sel", sub(add("b", mul(2, "c")), 2))]
+    s = solver(["a", "b", "c", "x"], premises)
+    assert s.derive_pins == [0]
+    assert isinstance(s.add_solved("x", "c", tag="h:x"), Implied)
+    assert s.derive() == 3
+    assert pins(s) == {"a": 0, "b": 0, "c": 1, "x": 1}
