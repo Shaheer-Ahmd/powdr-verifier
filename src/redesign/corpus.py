@@ -36,6 +36,7 @@ def run_sweep(
     use_hints: bool = True,
     use_constants: bool = True,
     use_one_hot: bool = True,
+    use_case_split: bool = True,
     passes: Iterable[str] = (),
     on_pair: Callable[[list[dict], list[Report | None], Circuit, Circuit], None]
     | None = None,
@@ -90,6 +91,7 @@ def run_sweep(
                     use_hints,
                     use_constants,
                     use_one_hot,
+                    use_case_split,
                 )
             except MissingDefinition as exc:
                 # Only completeness raises; still record soundness separately.
@@ -104,6 +106,7 @@ def run_sweep(
                         use_hints,
                         use_constants,
                         use_one_hot,
+                        use_case_split,
                     )
                 pair = [_error(base, "completeness", str(exc))]
                 pair += [_record(base, r) for r in reports[1:]]
@@ -125,6 +128,7 @@ def run_sweep(
         "hints": use_hints,
         "constants": use_constants,
         "one_hot": use_one_hot,
+        "case_split": use_case_split,
         "seconds": round(time.monotonic() - start, 1),
         "created": datetime.now().astimezone().isoformat(timespec="seconds"),
         "verifier_commit": _commit(),
@@ -163,6 +167,12 @@ def _record(base: dict, r: Report) -> dict:
         "hints_rejected": r.hints_rejected,
         "constants_solved": r.constants_solved,
         "pinned": r.pinned,
+        "pinned_after_hints": r.pinned_after_hints,
+        "case_splits": r.case_splits,
+        "case_split_nodes": r.case_split_nodes,
+        "case_split_capped": r.case_split_capped,
+        "case_split_unsat": r.case_split_unsat,
+        "case_split_ms": r.case_split_ms,
         "witnesses": [[cols, w] for cols, w in r.mapping.witnesses],
         "unmapped": sorted(r.mapping.unmapped),
         "unmapped_reasons": dict(sorted(r.mapping.unmapped_reason.items())),
@@ -188,6 +198,12 @@ def _error(base: dict, direction: str, msg: str) -> dict:
         "hints_rejected": 0,
         "constants_solved": 0,
         "pinned": 0,
+        "pinned_after_hints": 0,
+        "case_splits": 0,
+        "case_split_nodes": 0,
+        "case_split_capped": 0,
+        "case_split_unsat": 0,
+        "case_split_ms": 0,
         "witnesses": [],
         "unmapped": [],
         "unmapped_reasons": {},

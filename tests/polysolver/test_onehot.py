@@ -36,8 +36,8 @@ def selector(weights, k):
 
 
 def solver(names, premises, ranges=(), run=True, **kw):
-    """Premises tagged by name, then ranges, then derive()."""
-    s = PolySolver(VarTable(), declared=names, **kw)
+    """Premises tagged by name, then ranges, then derive() without rule C (test_casesplit)."""
+    s = PolySolver(VarTable(), declared=names, **{"case_split": False, **kw})
     for tag, e in premises:
         s.add_premise(e, tag=tag)
     for x, lo, hi in ranges:
@@ -222,11 +222,15 @@ def test_gated_group(gate_on):
 
 def test_screen_skips_premises_with_other_variables():
     # The gated premise mentions x, y, z, which are not 0-or-1 variables: the
-    # pass never expands it, also not after the flags are pinned.
+    # pass does not expand it. Once flags are pinned to 0 it is read off its
+    # key, once, since a gate at 0 could have removed variables.
     extra = [mul(add(*FLAGS), add(mul("x", "y"), "z"))]
     s = alu(2, extra=extra, names=["x", "y", "z"])
-    assert s.premises_expanded == alu(2).premises_expanded
+    assert s.premises_expanded == alu(2).premises_expanded + 1
     assert pins(s) == pins(alu(2))
+    # Pinned to 1 only, nothing can have gone: never expanded.
+    s = alu(2, extra=[mul("xor", add(mul("x", "y"), "z"))], names=["x", "y", "z"])
+    assert s.premises_expanded == alu(2).premises_expanded
 
 
 def test_collapsed_range_is_substituted():
