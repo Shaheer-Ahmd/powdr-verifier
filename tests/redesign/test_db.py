@@ -90,17 +90,18 @@ def test_hint_verdicts_match_the_counters(recorded):
         assert n[(1, 1)] == s["hints_agreed"]
     key = ("2100224", "002->003", "completeness")
     s = _steps(db, run)[key]
-    assert (s["hints_accepted"], s["hints_rejected"]) == (6339, 4564)  # test_opcode_flags_...
-    # Every pin has a hint that agrees: one-hot pins and constants (x - c), both
-    # derived before the hints.
-    assert s["hints_agreed"] == s["pinned"] + s["constants_solved"] == 6165
+    # test_opcode_flags_pinned_by_one_hot has (6339, 4564) without rule C.
+    assert (s["hints_accepted"], s["hints_rejected"]) == (8508, 2395)
+    # Every pin has a hint that agrees: pins (one-hot, rule C) and constants
+    # (x - c), all derived before the hints.
+    assert s["hints_agreed"] == s["pinned"] + s["constants_solved"] == 7370
     o = _steps(db, off)[key]
     assert o["hints_agreed"] == o["constants_solved"] == 4111 and o["pinned"] == 0
-    # Rejected there: the load/store and shift constants, and the write_data copies.
+    # Rejected there: mostly the shift chip's constants (rule C pins load/store).
     rejected = Counter()
     for r in db.hint_forms(run, Filters(pair="002->003"), accepted=False):
         rejected[r["form"]] += r["n"]  # summed over the reject kinds
-    assert rejected == {"c": 3564, "y": 1000}
+    assert rejected == {"c": 2359, "y": 36}
 
 
 SOLVER = {"passes": ["solver"], "directions": ("completeness",)}  # steps with hints
@@ -116,7 +117,7 @@ def test_schema_1_gains_the_agreed_bit_and_forms(tmp_path):
         db.con.execute("ALTER TABLE steps DROP COLUMN hints_agreed")
         db.con.execute("PRAGMA user_version = 1")
     with SweepDB(path) as db:
-        assert db.query("PRAGMA user_version")[0][0] == 3
+        assert db.query("PRAGMA user_version")[0][0] == 4
         old = db.query("SELECT COUNT(*), COUNT(agreed), COUNT(form) FROM hints")[0]
         assert old[0] > 0 and (old[1], old[2]) == (0, 0)
         assert db.runs()[0]["hints_agreed"] is None  # unknown, not 0

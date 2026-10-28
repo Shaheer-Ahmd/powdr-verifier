@@ -31,6 +31,14 @@ derive() steps, each sound on its own:
 - Sel: a linear premise w_0 + sum w_x * x over members of one group comes to
   w_0 + w_j for the member j that is 1, so w_j = -w_0. Every member whose
   weight (0 if absent) differs is 0; if only one member is left, it is 1.
+- C (case split), once the steps above have nothing left: a premise whose
+  variables all have a set of values couples them, and x's group is what such
+  premises reach from x. In every model the group takes one combination of
+  values that fits them all, so if only one does, each variable is pinned.
+  Leaving a premise out is sound, so one with any other variable is skipped.
+
+derive() stops: domains only shrink, a variable is replaced at most once, and
+C searches only after a coupling premise changed (its variables are seeds).
 
 Rules, cheapest first:
 - N (normalize): q has the same zero key as one premise.
@@ -43,6 +51,8 @@ ranges and definitions.
 
 from __future__ import annotations
 
+import heapq
+import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -54,6 +64,10 @@ from .expr import Expr, product_factors, variables
 from .table import Var, VarTable
 
 BABYBEAR = 2013265921
+# Rule C gives up on a group with more cases than this, or a search that tries
+# more values. keccak's largest group has 256 cases.
+CASE_SPLIT_GROUP_CAP = 4096
+CASE_SPLIT_NODE_CAP = 100_000
 
 
 class UndefinedVariable(LookupError):
@@ -81,6 +95,10 @@ class Unknown:
 
 
 Verdict = Implied | Unknown
+
+
+class _TooManyCases(Exception):
+    """Rule C's search tried more than CASE_SPLIT_NODE_CAP values."""
 
 
 class _Domain(NamedTuple):
@@ -126,13 +144,17 @@ class PolySolver:
         max_terms: int = P.MAX_TERMS,
         constants: bool = True,
         one_hot: bool = True,
+        case_split: bool = True,
+        two_value: bool = True,
     ):
         self.table = table
         self.p = p
         self.max_terms = max_terms
-        # derive()'s steps: pins from x - c, and the rest (domains of several
-        # values, G and Sel).
+        # derive()'s steps: pins from x - c, the one-hot steps (domains of
+        # several values, G and Sel), and rule C, which may split on variables
+        # with two values or only on those with more.
         self._use_constants, self._use_one_hot = constants, one_hot
+        self._use_case_split, self._two_value = case_split, two_value
         self.declared: frozenset[Var] = frozenset(table.var(n) for n in declared)
         self._premises: list[_Premise] = []
         # Premise index for rule N: variable -> ids of the premises that mention it.
@@ -161,6 +183,10 @@ class PolySolver:
         self._queue: deque[int] | None = None
         self._queued: set[int] = set()
         self._pending: set[int] = set()
+        # Rule C's seeds: variables of coupling premises popped since their
+        # group was last searched. The heap hands them out by name.
+        self._seeds: set[Var] = set()
+        self._seed_heap: list[tuple[str, Var]] = []
         self.premises_expanded = 0  # premise keys computed (rule N)
         self.premises_split = 0  # premises split into factors (rule S)
         self.solved_accepted = 0  # add_solved calls accepted (also values equal to a pin)
@@ -169,6 +195,10 @@ class PolySolver:
         self.constants_solved = 0  # variables pinned by a premise x - c
         self.pinned = 0  # variables pinned otherwise (a collapsed domain)
         self.derive_pins: list[int] = []  # variables pinned by each derive() call
+        self.case_splits = 0  # groups rule C searched
+        self.case_split_nodes = 0  # values it tried, over all its searches
+        self.case_split_capped = 0  # groups or searches over the caps
+        self.case_split_seconds = 0.0  # its own time
         # (tag, verdict, agreed with x's value) per add_solved call
         self.solved_log: list[tuple[str, Verdict, bool]] = []
 
@@ -305,8 +335,11 @@ class PolySolver:
             return False
         self._domains[v] = _Domain(lo, hi, values, list(tags))
         self._unknown.clear()
-        if hi <= 1 and (old is None or old.hi > 1):
-            self._requeue_vars([v])  # newly in [0, 1]: a premise over v may be a group now
+        # Newly in [0, 1]: a premise over v may be a group now. A new or smaller
+        # set: one may couple finite domains now (rule C).
+        newly_01 = hi <= 1 and (old is None or old.hi > 1)
+        if newly_01 or values != (old.values if old is not None else None):
+            self._requeue_vars([v])
         if lo == hi and v not in self._solved:
             self._collapsed.append(v)
         return True
@@ -344,11 +377,19 @@ class PolySolver:
             # One-variable premises first: they hold the x^2 - x that G needs.
             self._enqueue(i for i in todo if len(self._premises[i].vars) == 1)
             self._enqueue(todo)
-            while self._queue:
-                i = self._queue.popleft()
-                self._queued.discard(i)
-                self._step(i)
-                self._substitute_collapsed()
+            while True:
+                while self._queue:
+                    i = self._queue.popleft()
+                    self._queued.discard(i)
+                    self._step(i)
+                    self._substitute_collapsed()
+                # Rule C, one group at a time, so the cheap steps go first.
+                x = self._next_seed()
+                if x is None:
+                    break
+                if x not in self._solved and self._finite(x):
+                    self._case_split(x)
+                    self._substitute_collapsed()
         finally:
             self._queue = None
         self.derive_pins.append(self.pinned + self.constants_solved - before)
@@ -711,6 +752,8 @@ class PolySolver:
     def _step(self, i: int) -> None:
         """The domain step, G and Sel for premise i, as it reads under the solved equations."""
         vs = self._step_vars(i)
+        if self._use_case_split and len(vs) > 1 and all(self._finite(v) for v in vs):
+            self._add_seeds(vs)  # a coupling premise: rule C searches its group
         if len(vs) == 1:
             self._domain_step(i, *vs)
             return
@@ -739,12 +782,15 @@ class PolySolver:
     def _step_vars(self, i: int) -> set[Var]:
         """The variables premise i mentions under the solved equations.
 
-        Read off the syntax, unless the premise mentions a variable solved to
-        a non-constant value (a hint): that can cancel a variable, as in
-        y + x - a - 3 with x := a, so then they are read off its key.
+        Read off the syntax, unless a solved variable can have removed one: a
+        gate solved to 0 removes what it gates (f*y with f := 0), and a hint's
+        value can cancel a variable (y + x - a - 3 with x := a). Then they
+        are read off the premise's key.
         """
-        if any(any(self._solved.get(v, ())) for v in self._premises[i].vars):
-            return self._premise_vars(i)
+        for v in self._premises[i].vars:
+            value = self._solved.get(v)
+            if value is not None and (not value or any(value)):  # 0, or not a constant
+                return self._premise_vars(i)
         return self._current_vars(i)
 
     def _domain_step(self, i: int, x: Var) -> None:
@@ -867,6 +913,138 @@ class PolySolver:
             else:
                 out |= P.variables_of(value)
         return out
+
+    # ------------------------------------------------------------ rule C
+
+    def _finite(self, v: Var) -> bool:
+        """v has a set of values rule C splits on (two values only if two_value is on)."""
+        d = self._domains.get(v)
+        return d is not None and d.values is not None and (
+            self._two_value or len(d.values) > 2
+        )
+
+    def _add_seeds(self, vs: Iterable[Var]) -> None:
+        for v in vs:
+            if v not in self._seeds:
+                self._seeds.add(v)
+                heapq.heappush(self._seed_heap, (self.table.name(v), v))
+
+    def _next_seed(self) -> Var | None:
+        """The seed with the smallest name (names, unlike Var ids, are stable)."""
+        while self._seed_heap:
+            _, v = heapq.heappop(self._seed_heap)
+            if v in self._seeds:  # else a group search already took it
+                self._seeds.discard(v)
+                return v
+        return None
+
+    def _case_split(self, x: Var) -> None:
+        """Rule C: search x's group, and pin it if exactly one combination fits."""
+        start = time.perf_counter()
+        try:
+            group = self._case_split_group(x)
+            if group is not None:
+                self._case_split_search(*group)
+        finally:
+            self.case_split_seconds += time.perf_counter() - start
+
+    def _case_split_group(self, x: Var) -> tuple[dict, list[int]] | None:
+        """(values of each variable, coupling premise ids) of x's group; None if declined."""
+        dom = {x: sorted(self._domains[x].values)}
+        cases = len(dom[x])
+        coupling: list[int] = []
+        seen: set[int] = set()  # taken or not, each premise is looked at once
+        todo = [x]
+        while todo:
+            for i in self._mentioning(todo.pop()):
+                if i in seen:
+                    continue
+                seen.add(i)
+                # The syntax first, so a flag that gates many data premises
+                # does not expand them all.
+                if not all(self._finite(v) for v in self._step_vars(i)):
+                    continue
+                vs = self._premise_vars(i)
+                if len(vs) < 2 or not all(self._finite(v) for v in vs):
+                    continue  # a domain premise, or one that cancelled down
+                coupling.append(i)
+                for w in vs - dom.keys():
+                    dom[w] = sorted(self._domains[w].values)
+                    cases *= len(dom[w])
+                    todo.append(w)
+                    self._seeds.discard(w)  # searched now, with x
+                if cases > CASE_SPLIT_GROUP_CAP:
+                    self.case_split_capped += 1
+                    return None
+        return (dom, coupling) if coupling else None
+
+    def _case_split_search(self, dom: dict, coupling: list[int]) -> None:
+        """Pin the group's variables if exactly one combination fits the coupling premises."""
+        self.case_splits += 1
+        keys = {i: self._premise_key(i) for i in coupling}
+        cvars = {i: self._premise_vars(i) for i in coupling}
+        # Variables in the most premises first, so premises are complete, and
+        # checked, early (on load/store: the flags, then is_load). Ties by
+        # name: Var ids depend on the order columns were interned.
+        order = sorted(
+            dom,
+            key=lambda w: (-sum(w in cvars[i] for i in coupling), self.table.name(w)),
+        )
+        pos = {w: n for n, w in enumerate(order)}
+        # Each premise is checked once its last variable has a value, the
+        # shortest first, as (coeff, ((position, exp), ...)) terms.
+        checks: list[list] = [[] for _ in order]
+        for i in sorted(coupling, key=lambda i: len(keys[i])):
+            terms = [(c, tuple((pos[y], e) for y, e in m)) for m, c in keys[i]]
+            checks[max(pos[y] for y in cvars[i])].append(terms)
+
+        p, n = self.p, len(order)
+        choices = [dom[w] for w in order]
+        vals = [0] * n
+        fit: list[tuple[int, ...]] = []
+        nodes = 0
+
+        def fits(terms) -> bool:
+            total = 0
+            for c, mono in terms:
+                for at, e in mono:
+                    c = c * pow(vals[at], e, p) % p
+                total += c
+            return total % p == 0
+
+        # Depth first, without recursion, until a second combination fits:
+        # then nothing is decided.
+        nxt = [0] * n  # per level, the next choice to try
+        level = 0
+        try:
+            while level >= 0 and len(fit) < 2:
+                if level == n:
+                    fit.append(tuple(vals))
+                    level -= 1
+                elif nxt[level] == len(choices[level]):
+                    nxt[level] = 0
+                    level -= 1
+                else:
+                    vals[level] = choices[level][nxt[level]]
+                    nxt[level] += 1
+                    nodes += 1
+                    if nodes > CASE_SPLIT_NODE_CAP:
+                        raise _TooManyCases
+                    if all(fits(t) for t in checks[level]):
+                        level += 1
+        except _TooManyCases:
+            self.case_split_capped += 1
+            fit = []
+        self.case_split_nodes += nodes
+        # None fits: the premises contradict each other, which is not used.
+        if len(fit) != 1:
+            return
+        tags = [t for i in coupling for t in self._premise_tags(i)]
+        tags += self._range_tags(order)
+        for w, v in zip(order, fit[0]):
+            self._reduce_domain(w, v, v, tags, frozenset((v,)))
+
+    # ------------------------------------------------------------ work list
 
     def _enqueue(self, ids: Iterable[int]) -> None:
         """Queue premises for derive(); outside it, keep them for the next call."""

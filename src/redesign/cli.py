@@ -50,6 +50,16 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="derive no booleanity or other multi-value domains, no flag pins",
     )
+    c.add_argument(
+        "--no-case-split",
+        action="store_true",
+        help="skip rule C (case split over variables with a few values each)",
+    )
+    c.add_argument(
+        "--no-two-value",
+        action="store_true",
+        help="rule C splits only on variables with three values or more",
+    )
     c.add_argument("--root", type=Path, help="dump root (default: powdr-dumps)")
     c.add_argument("--json", action="store_true", help="machine-readable output")
     c.add_argument("-v", "--verbose", action="store_true", help="list every obligation")
@@ -73,6 +83,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-one-hot",
         action="store_true",
         help="derive no booleanity or other multi-value domains, no flag pins",
+    )
+    s.add_argument(
+        "--no-case-split",
+        action="store_true",
+        help="skip rule C (case split over variables with a few values each)",
+    )
+    s.add_argument(
+        "--no-two-value",
+        action="store_true",
+        help="rule C splits only on variables with three values or more",
     )
     s.add_argument(
         "--pass",
@@ -171,6 +191,9 @@ def _as_dict(r: Report) -> dict:
         "hints_rejected": r.hints_rejected,
         "constants_solved": r.constants_solved,
         "pinned": r.pinned,
+        "pinned_after_hints": r.pinned_after_hints,
+        "case_splits": r.case_splits,
+        "case_split_nodes": r.case_split_nodes,
         "witnesses": [
             {"columns": cols, "witness": w} for cols, w in r.mapping.witnesses
         ],
@@ -241,6 +264,8 @@ def _sweep(args, directions) -> int:
                 use_hints=not args.no_hints,
                 use_constants=not args.no_constants,
                 use_one_hot=not args.no_one_hot,
+                use_case_split=not args.no_case_split,
+                use_two_value=not args.no_two_value,
                 passes=args.passes,
                 on_pair=record if db else None,
             )
@@ -328,6 +353,8 @@ def main(argv: list[str] | None = None) -> int:
             not args.no_hints,
             not args.no_constants,
             not args.no_one_hot,
+            not args.no_case_split,
+            not args.no_two_value,
         )
     except (ResolveError, FileNotFoundError, MissingDefinition) as exc:
         print(f"redesign: {type(exc).__name__}: {exc}", file=sys.stderr)

@@ -278,9 +278,14 @@ def _compare(db: SweepDB, run, base, f: Filters, limit: int, top: int) -> list:
         ("hints_rejected", "hints rejected", False),
         ("pinned", "pins", None),
         ("constants_solved", "constants solved", None),
+        ("pinned_after_hints", "  of both, after the hints", None),
+        ("case_splits", "rule C searches", None),
+        ("case_split_nodes", "  values tried", None),
+        ("case_split_capped", "  over a cap", None),
+        ("case_split_ms", "  its own ms", None),
     ):
-        if key == "hints_agreed" and None in (b[key], a[key]):
-            # A run from before schema 2: unknown, not 0.
+        if None in (b[key], a[key]):
+            # A run from before the counter was recorded: unknown, not 0.
             totals.add_row(label, _maybe(b[key]), _maybe(a[key]), _dash())
             continue
         x, y = b[key] or 0, a[key] or 0
@@ -447,6 +452,8 @@ def _hint_summary(db: SweepDB, run, f: Filters) -> Text | None:
     rejected = sum(r["hints_rejected"] or 0 for r in rows)
     pins = sum(r["pinned"] or 0 for r in rows)
     consts = sum(r["constants_solved"] or 0 for r in rows)
+    splits = sum(r["case_splits"] or 0 for r in rows)
+    split_ms = sum(r["case_split_ms"] or 0 for r in rows)
     why, forms = Counter(), Counter()
     for r in db.hint_forms(run["id"], f, accepted=False):
         why[r["kind"]] += r["n"]
@@ -468,6 +475,7 @@ def _hint_summary(db: SweepDB, run, f: Filters) -> Text | None:
     if forms:
         out.append(f" (by form: {_top(forms, 4)})", style="dim")
     out.append(f"; {pins:,} pins; {consts:,} constants solved; ")
+    out.append(f"{splits:,} rule C searches ({split_ms / 1000:.1f} s); ")
     out.append(f"{with_hint:,} of {discharged:,} discharged obligations used a hint")
     out.append("\n(--hints lists the rejected ones)", style="dim")
     return out

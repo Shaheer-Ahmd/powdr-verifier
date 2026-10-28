@@ -98,12 +98,30 @@ def test_opcode_flags_pinned_by_one_hot(one_hot, hints, undecided):
     # solver pass: the opcode flags follow only from booleanity, the sum of
     # the flags and the opcode selector together. The pass pins them before
     # the hints (which then agree), and the pins ungate the timestamp checks.
-    # What stays undecided is in the shift chip.
+    # What stays undecided is in the shift chip. Rule C is left out: it pins
+    # the load/store flags too.
     (cmp,) = check("keccak", "2100224", "002", "003", ("completeness",),
-                   use_one_hot=one_hot)
+                   use_one_hot=one_hot, use_case_split=False)
     assert (cmp.hints_accepted, cmp.hints_rejected) == hints
     assert cmp.counts("constraint")["undecided"] == undecided
     assert (cmp.pinned > 0) == one_hot
+
+
+@pytest.mark.parametrize(
+    "case_split, hints, undecided",
+    [(True, (1661, 9), (8, 0)), (False, (797, 873), (8, 192))],
+    ids=["rule C", "no rule C"],
+)
+def test_load_store_flags_pinned_by_rule_c(case_split, hints, undecided):
+    # solver pass: a load/store flag is 0, 1 or 2, and only all the flag
+    # premises together say which (rule C). derive() pins the flags before the
+    # hints; the data hints then follow by rule N, and with them the lookups.
+    (cmp,) = check("keccak", "2099828", "002", "003", ("completeness",),
+                   use_case_split=case_split)
+    assert (cmp.hints_accepted, cmp.hints_rejected) == hints
+    assert (cmp.counts("constraint")["undecided"],
+            cmp.counts("bus").get("undecided", 0)) == undecided
+    assert cmp.case_splits == (96 if case_split else 0)  # one search per instance
 
 
 def test_soundness_opposite_polarity_is_normalized():

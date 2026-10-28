@@ -33,7 +33,9 @@ from .circuit import Circuit
 from .sweep import Obligation, Report
 
 DEFAULT_PATH = REPORTS_DIR / "sweeps.db"
-SCHEMA_VERSION = 3  # 2: hints agreed with a pin; 3: the form of a hint's value
+# 2: hints agreed with a pin; 3: the form of a hint's value; 4: derive's
+# counters (pins after the hints, rule C's searches)
+SCHEMA_VERSION = 4
 EXPR_CHARS = 2000  # longer expressions are cut (shapes are not: they are hashed)
 KINDS = {"constraint": "c", "bus": "b"}  # obligation kind -> name prefix ("c17", "b3")
 
@@ -85,6 +87,11 @@ CREATE TABLE IF NOT EXISTS steps (
     hints_rejected INTEGER,
     constants_solved INTEGER,
     pinned INTEGER,
+    pinned_after_hints INTEGER,  -- NULL before schema 4, and the four below
+    case_splits INTEGER,
+    case_split_nodes INTEGER,
+    case_split_capped INTEGER,
+    case_split_ms INTEGER,
     UNIQUE (run_id, block, pair, direction)
 );
 CREATE INDEX IF NOT EXISTS steps_by_pass ON steps (run_id, pass);
@@ -164,6 +171,11 @@ class SweepDB:
             ("steps", "hints_agreed", "INTEGER"),  # schema 2
             ("hints", "agreed", "INTEGER"),  # schema 2
             ("hints", "form", "TEXT"),  # schema 3
+            ("steps", "pinned_after_hints", "INTEGER"),  # schema 4
+            ("steps", "case_splits", "INTEGER"),
+            ("steps", "case_split_nodes", "INTEGER"),
+            ("steps", "case_split_capped", "INTEGER"),
+            ("steps", "case_split_ms", "INTEGER"),
         ):
             if col not in self._columns(table):
                 self.con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {type_}")
@@ -368,7 +380,8 @@ class SweepDB:
             " SUM(s.unmapped > 0) AS with_unmapped,"
             " SUM(s.hints_accepted) AS hints_accepted, SUM(s.hints_agreed) AS hints_agreed,"
             " SUM(s.hints_rejected) AS hints_rejected,"
-            " SUM(s.pinned) AS pinned, SUM(s.constants_solved) AS constants_solved"
+            " SUM(s.pinned) AS pinned, SUM(s.constants_solved) AS constants_solved,"
+            " SUM(s.case_splits) AS case_splits, SUM(s.case_split_ms) AS case_split_ms"
             f" FROM steps s WHERE {where} GROUP BY s.pass, s.direction"
             " ORDER BY first, s.direction",
             params,
@@ -595,7 +608,11 @@ class SweepDB:
             "SUM(s.undecided) AS undecided, SUM(s.verified) AS verified,"
             " SUM(s.hints_accepted) AS hints_accepted, SUM(s.hints_agreed) AS hints_agreed,"
             " SUM(s.hints_rejected) AS hints_rejected,"
-            " SUM(s.pinned) AS pinned, SUM(s.constants_solved) AS constants_solved"
+            " SUM(s.pinned) AS pinned, SUM(s.constants_solved) AS constants_solved,"
+            " SUM(s.pinned_after_hints) AS pinned_after_hints,"
+            " SUM(s.case_splits) AS case_splits, SUM(s.case_split_nodes) AS case_split_nodes,"
+            " SUM(s.case_split_capped) AS case_split_capped,"
+            " SUM(s.case_split_ms) AS case_split_ms"
         )
         counters = {
             side: self.query(f"SELECT {sums} FROM shared p JOIN steps s ON s.id = p.{col}")[0]
