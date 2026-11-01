@@ -29,9 +29,9 @@ Rules that add to the store, each a local implication:
   zero divisors. So x - c pins x, and x(x - 1) gives {0, 1}.
 - O (one-hot), on a premise whose variables are all in [0, 1]:
   - group part: the premise reads x_1 + ... + x_n - c with c in {0, 1}.
-    The integer sum is in [0, n] and n < p, so it is c: with c = 0 every
-    x_i is 0, a single x_1 is c, and otherwise exactly one x_i is 1 (the
-    premise is a group).
+    The integer sum is in [0, n] and n < p (the constructor requires
+    max_terms < p), so it is c: with c = 0 every x_i is 0, a single x_1 is
+    c, and otherwise exactly one x_i is 1 (the premise is a group).
   - selector part: a premise w_0 + sum w_x * x over members of a group
     reads w_0 + w_j for the member j that is 1. Every member whose weight
     (0 if absent) is not -w_0 is 0; if one member is left, it is 1.
@@ -169,6 +169,10 @@ class PolySolver:
         one_hot: bool = True,
         case_split: bool = True,
     ):
+        # Rule O's group part needs n < p for a sum of n variables. A key has
+        # at most max_terms terms, so this makes it hold.
+        if max_terms >= p:
+            raise ValueError(f"max_terms ({max_terms}) must be below p ({p})")
         self.table = table
         self.p = p
         self.max_terms = max_terms
@@ -811,10 +815,11 @@ class PolySolver:
 
         Group part: the premise reads x_1 + ... + x_n - c with unit weights
         and c in {0, 1}. Side condition: n < p, true as a key has at most
-        max_terms terms; so the integer sum, in [0, n], is c. Conclusion:
-        with c = 0 every x_i is 0; with n = 1, x_1 = 1; otherwise exactly one
-        x_i is 1, and the premise is recorded as a group for the selector
-        part. Tags: the premise and the members' domains.
+        max_terms terms and the constructor requires max_terms < p; so the
+        integer sum, in [0, n], is c. Conclusion: with c = 0 every x_i is 0;
+        with n = 1, x_1 = 1; otherwise exactly one x_i is 1, and the premise
+        is recorded as a group for the selector part. Tags: the premise and
+        the members' domains.
         """
         lin = self._linear(self._premise_key(i))
         if lin is None or not lin[0]:
