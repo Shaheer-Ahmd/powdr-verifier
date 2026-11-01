@@ -282,6 +282,7 @@ def _compare(db: SweepDB, run, base, f: Filters, limit: int, top: int) -> list:
         ("case_splits", "rule C searches", None),
         ("case_split_nodes", "  values tried", None),
         ("case_split_capped", "  over a cap", None),
+        ("case_split_unsat", "  with no fit", None),
         ("case_split_ms", "  its own ms", None),
     ):
         if None in (b[key], a[key]):

@@ -194,6 +194,7 @@ def _as_dict(r: Report) -> dict:
         "pinned_after_hints": r.pinned_after_hints,
         "case_splits": r.case_splits,
         "case_split_nodes": r.case_split_nodes,
+        "case_split_unsat": r.case_split_unsat,
         "witnesses": [
             {"columns": cols, "witness": w} for cols, w in r.mapping.witnesses
         ],
@@ -221,7 +222,8 @@ def _print(r: Report, verbose: bool) -> None:
         f"; hints {r.hints_accepted} used ({r.hints_agreed} agreed with a pin),"
         f" {r.hints_rejected} rejected"
         f"; {r.constants_solved} constants solved; {r.pinned} pinned"
-        f"; rule C: {r.case_splits} searches, {r.case_split_nodes} values tried)"
+        f"; rule C: {r.case_splits} searches, {r.case_split_nodes} values tried,"
+        f" {r.case_split_unsat} with no fit)"
     )
     for cols, w in r.mapping.witnesses:
         print(f"  witness  {', '.join(cols)} := {json.dumps(w)}")

@@ -92,7 +92,7 @@ def test_variables_every_fit_agrees_on_are_pinned():
 
 def test_contradiction_pins_nothing():
     s = toy(extra={"eq": sub("f", "g")})  # f = g = 1 is the only sum, and fails dec
-    assert pins(s) == {} and s.case_splits == 1
+    assert pins(s) == {} and s.case_splits == 1 and s.case_split_unsat == 1
 
 
 def test_group_over_the_cap():

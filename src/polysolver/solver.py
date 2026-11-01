@@ -61,6 +61,7 @@ from typing import NamedTuple
 
 from . import poly as P
 from .defs import NO_DEFS, Defs, InvalidDefs, Opaque
+from .enumeration import GaveUp, NoSolution, fixed_values
 from .expr import Expr, product_factors, variables
 from .table import Var, VarTable
 
@@ -96,10 +97,6 @@ class Unknown:
 
 
 Verdict = Implied | Unknown
-
-
-class _TooManyCases(Exception):
-    """Rule C's search tried more than CASE_SPLIT_NODE_CAP values."""
 
 
 class _Domain(NamedTuple):
@@ -199,6 +196,7 @@ class PolySolver:
         self.case_splits = 0  # groups rule C searched
         self.case_split_nodes = 0  # values it tried, over all its searches
         self.case_split_capped = 0  # groups or searches over the caps
+        self.case_split_unsat = 0  # searches with no fit: the premises contradict each other
         self.case_split_seconds = 0.0  # its own time
         # (tag, verdict, agreed with x's value) per add_solved call
         self.solved_log: list[tuple[str, Verdict, bool]] = []
@@ -940,12 +938,31 @@ class PolySolver:
         return None
 
     def _case_split(self, x: Var) -> None:
-        """Rule C: search x's group, and pin it if exactly one combination fits."""
+        """Rule C: pin each variable of x's group that has one value in every fit."""
         start = time.perf_counter()
         try:
             group = self._case_split_group(x)
-            if group is not None:
-                self._case_split_search(*group)
+            if group is None:
+                return
+            dom, coupling = group
+            self.case_splits += 1
+            # Ties in the search order go by name: Var ids depend on the order
+            # columns were interned.
+            domains = {w: tuple(dom[w]) for w in sorted(dom, key=self.table.name)}
+            keys = [self._premise_key(i) for i in coupling]
+            found = fixed_values(keys, domains, self.p, CASE_SPLIT_NODE_CAP)
+            self.case_split_nodes += found.nodes
+            if isinstance(found, NoSolution):
+                self.case_split_unsat += 1  # counted, and nothing is used
+                return
+            if isinstance(found, GaveUp):
+                self.case_split_capped += 1  # what was proved before stays proved
+            if not found.values:
+                return
+            tags = [t for i in coupling for t in self._premise_tags(i)]
+            tags += self._range_tags(domains)
+            for w, v in found.values.items():
+                self._reduce_domain(w, v, v, tags, frozenset((v,)))
         finally:
             self.case_split_seconds += time.perf_counter() - start
 
@@ -978,93 +995,6 @@ class PolySolver:
                     self.case_split_capped += 1
                     return None
         return (dom, coupling) if coupling else None
-
-    def _case_split_search(self, dom: dict, coupling: list[int]) -> None:
-        """Pin each variable that has one value in every combination that fits.
-
-        Depth first until a second combination fits; one alone pins them all.
-        Where two fit, a variable they give different values stays as it is;
-        one they agree on is pinned if no combination gives it another value.
-        """
-        self.case_splits += 1
-        keys = {i: self._premise_key(i) for i in coupling}
-        cvars = {i: self._premise_vars(i) for i in coupling}
-        # Variables in the most premises first, so premises are complete, and
-        # checked, early (on load/store: the flags, then is_load). Ties by
-        # name: Var ids depend on the order columns were interned.
-        order = sorted(
-            dom,
-            key=lambda w: (-sum(w in cvars[i] for i in coupling), self.table.name(w)),
-        )
-        pos = {w: n for n, w in enumerate(order)}
-        # Each premise is checked once its last variable has a value, the
-        # shortest first, as (coeff, ((position, exp), ...)) terms.
-        checks: list[list] = [[] for _ in order]
-        for i in sorted(coupling, key=lambda i: len(keys[i])):
-            terms = [(c, tuple((pos[y], e) for y, e in m)) for m, c in keys[i]]
-            checks[max(pos[y] for y in cvars[i])].append(terms)
-
-        p, n = self.p, len(order)
-        vals = [0] * n
-        nodes = 0
-
-        def fits(terms) -> bool:
-            total = 0
-            for c, mono in terms:
-                for at, e in mono:
-                    c = c * pow(vals[at], e, p) % p
-                total += c
-            return total % p == 0
-
-        def search(choices: list, want: int) -> list[tuple[int, ...]]:
-            """Up to ``want`` combinations of ``choices`` that fit, without recursion."""
-            nonlocal nodes
-            found: list[tuple[int, ...]] = []
-            nxt = [0] * n  # per level, the next choice to try
-            level = 0
-            while level >= 0 and len(found) < want:
-                if level == n:
-                    found.append(tuple(vals))
-                    level -= 1
-                elif nxt[level] == len(choices[level]):
-                    nxt[level] = 0
-                    level -= 1
-                else:
-                    vals[level] = choices[level][nxt[level]]
-                    nxt[level] += 1
-                    nodes += 1
-                    if nodes > CASE_SPLIT_NODE_CAP:
-                        raise _TooManyCases
-                    if all(fits(t) for t in checks[level]):
-                        level += 1
-            return found
-
-        choices = [dom[w] for w in order]
-        known: dict[int, int] = {}  # position -> its value in every fit
-        try:
-            fit = search(choices, 2)
-            # None fits: the premises contradict each other, which is not used.
-            if len(fit) == 1:
-                known = dict(enumerate(fit[0]))
-            for j in range(n if len(fit) == 2 else 0):
-                v = fit[0][j]
-                if any(f[j] != v for f in fit):
-                    continue  # two fits give it different values
-                others = [u for u in choices[j] if u != v]
-                found = search(choices[:j] + [others] + choices[j + 1 :], 1)
-                if found:
-                    fit += found  # may show other positions vary too
-                else:
-                    known[j] = v
-        except _TooManyCases:
-            self.case_split_capped += 1  # what was proved before stays proved
-        self.case_split_nodes += nodes
-        if not known:
-            return
-        tags = [t for i in coupling for t in self._premise_tags(i)]
-        tags += self._range_tags(order)
-        for j, v in known.items():
-            self._reduce_domain(order[j], v, v, tags, frozenset((v,)))
 
     # ------------------------------------------------------------ work list
 

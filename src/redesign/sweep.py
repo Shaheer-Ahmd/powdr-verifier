@@ -136,6 +136,7 @@ class Report:
     case_splits: int = 0  # groups rule C searched (derive)
     case_split_nodes: int = 0  # values it tried
     case_split_capped: int = 0  # groups or searches it gave up on (over a cap)
+    case_split_unsat: int = 0  # searches with no fit: the premises contradict each other
     case_split_ms: int = 0  # its own time
     # powdr's hints, in the order tried: (column, accepted, agreed with x's
     # value, rule or reject kind, note, form of t: hint_form).
@@ -326,6 +327,7 @@ def sweep(
     report.case_splits = solver.case_splits
     report.case_split_nodes = solver.case_split_nodes
     report.case_split_capped = solver.case_split_capped
+    report.case_split_unsat = solver.case_split_unsat
     report.case_split_ms = round(solver.case_split_seconds * 1000)
     report.hints_accepted = solver.solved_accepted
     report.hints_rejected = solver.solved_rejected

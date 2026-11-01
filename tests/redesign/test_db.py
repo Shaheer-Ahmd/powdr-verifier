@@ -13,7 +13,7 @@ from src.redesign.check import check
 from src.redesign.circuit import load_step
 from src.redesign.cli import _pair
 from src.redesign.corpus import _record, run_sweep
-from src.redesign.db import RUNG_BITS, Filters, SweepDB, render
+from src.redesign.db import RUNG_BITS, SCHEMA_VERSION, Filters, SweepDB, render
 from src.redesign.dbview import show
 from src.redesign.sweep import REASONS, Report
 
@@ -117,7 +117,7 @@ def test_schema_1_gains_the_agreed_bit_and_forms(tmp_path):
         db.con.execute("ALTER TABLE steps DROP COLUMN hints_agreed")
         db.con.execute("PRAGMA user_version = 1")
     with SweepDB(path) as db:
-        assert db.query("PRAGMA user_version")[0][0] == 4
+        assert db.query("PRAGMA user_version")[0][0] == SCHEMA_VERSION
         old = db.query("SELECT COUNT(*), COUNT(agreed), COUNT(form) FROM hints")[0]
         assert old[0] > 0 and (old[1], old[2]) == (0, 0)
         assert db.runs()[0]["hints_agreed"] is None  # unknown, not 0
