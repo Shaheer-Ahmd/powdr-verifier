@@ -17,14 +17,13 @@ def reference_solver(
     constants: bool = False,
     one_hot: bool = True,
     case_split: bool = True,
-    two_value: bool = False,
 ) -> PolySolver:
     """Premises and ranges from the reference side only (the polarity rule).
 
     The solver first derives domains from the premises and pins what they
     decide (derive): with ``constants`` a premise x - c, with ``one_hot``
     booleanity, flag groups and selectors, with ``case_split`` a case split
-    over finite domains (with ``two_value`` also over two-value ones).
+    over variables with three values each.
     ``hints`` are candidate solved equations x = t over reference columns,
     tried in order. The solver checks each one and keeps only those that
     follow from what it already knows (a hint equal to a pin is kept too); a
@@ -37,7 +36,6 @@ def reference_solver(
         constants=constants,
         one_hot=one_hot,
         case_split=case_split,
-        two_value=two_value,
     )
     for i, c in enumerate(ref.constraints):
         s.add_premise(c, tag=f"{ref.label}:c{i}")

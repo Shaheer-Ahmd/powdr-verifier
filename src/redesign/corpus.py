@@ -37,7 +37,6 @@ def run_sweep(
     use_constants: bool = True,
     use_one_hot: bool = True,
     use_case_split: bool = True,
-    use_two_value: bool = False,
     passes: Iterable[str] = (),
     on_pair: Callable[[list[dict], list[Report | None], Circuit, Circuit], None]
     | None = None,
@@ -93,7 +92,6 @@ def run_sweep(
                     use_constants,
                     use_one_hot,
                     use_case_split,
-                    use_two_value,
                 )
             except MissingDefinition as exc:
                 # Only completeness raises; still record soundness separately.
@@ -109,7 +107,6 @@ def run_sweep(
                         use_constants,
                         use_one_hot,
                         use_case_split,
-                        use_two_value,
                     )
                 pair = [_error(base, "completeness", str(exc))]
                 pair += [_record(base, r) for r in reports[1:]]
@@ -132,7 +129,6 @@ def run_sweep(
         "constants": use_constants,
         "one_hot": use_one_hot,
         "case_split": use_case_split,
-        "two_value": use_two_value,
         "seconds": round(time.monotonic() - start, 1),
         "created": datetime.now().astimezone().isoformat(timespec="seconds"),
         "verifier_commit": _commit(),

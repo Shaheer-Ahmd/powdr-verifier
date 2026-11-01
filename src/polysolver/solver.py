@@ -32,11 +32,11 @@ derive() steps, each sound on its own:
   w_0 + w_j for the member j that is 1, so w_j = -w_0. Every member whose
   weight (0 if absent) differs is 0; if only one member is left, it is 1.
 - C (case split), once the steps above have nothing left: a premise whose
-  variables all have a set of values couples them, and x's group is what such
-  premises reach from x. In every model the group takes one combination of
-  values that fits them all, so a variable with the same value in every
-  combination that fits is pinned. Leaving a premise out is sound, so one
-  with any other variable is skipped.
+  variables all have a set of three values couples them, and x's group is
+  what such premises reach from x. In every model the group takes one
+  combination of values that fits them all, so a variable with the same value
+  in every combination that fits is pinned. Leaving a premise out is sound,
+  so one with any other variable is skipped.
 
 derive() stops: domains only shrink, a variable is replaced at most once, and
 C searches only after a coupling premise changed (its variables are seeds).
@@ -67,7 +67,7 @@ from .table import Var, VarTable
 
 BABYBEAR = 2013265921
 # Rule C gives up on a group with more cases than this, or a search that tries
-# more values. keccak's largest group has 256 cases.
+# more values. keccak's largest group has 243 cases (five variables).
 CASE_SPLIT_GROUP_CAP = 4096
 CASE_SPLIT_NODE_CAP = 100_000
 
@@ -143,16 +143,14 @@ class PolySolver:
         constants: bool = True,
         one_hot: bool = True,
         case_split: bool = True,
-        two_value: bool = False,
     ):
         self.table = table
         self.p = p
         self.max_terms = max_terms
         # derive()'s steps: pins from x - c, the one-hot steps (domains of
-        # several values, G and Sel), and rule C, which may split on variables
-        # with two values or only on those with more.
+        # several values, G and Sel), and rule C over variables with three values.
         self._use_constants, self._use_one_hot = constants, one_hot
-        self._use_case_split, self._two_value = case_split, two_value
+        self._use_case_split = case_split
         self.declared: frozenset[Var] = frozenset(table.var(n) for n in declared)
         self._premises: list[_Premise] = []
         # Premise index for rule N: variable -> ids of the premises that mention it.
@@ -386,7 +384,7 @@ class PolySolver:
                 x = self._next_seed()
                 if x is None:
                     break
-                if x not in self._solved and self._finite(x):
+                if x not in self._solved and self._three_valued(x):
                     self._case_split(x)
                     self._substitute_collapsed()
         finally:
@@ -751,7 +749,7 @@ class PolySolver:
     def _step(self, i: int) -> None:
         """The domain step, G and Sel for premise i, as it reads under the solved equations."""
         vs = self._step_vars(i)
-        if self._use_case_split and len(vs) > 1 and all(self._finite(v) for v in vs):
+        if self._use_case_split and len(vs) > 1 and all(self._three_valued(v) for v in vs):
             self._add_seeds(vs)  # a coupling premise: rule C searches its group
         if len(vs) == 1:
             self._domain_step(i, *vs)
@@ -915,12 +913,10 @@ class PolySolver:
 
     # ------------------------------------------------------------ rule C
 
-    def _finite(self, v: Var) -> bool:
-        """v has a set of values rule C splits on (of two values only with two_value)."""
+    def _three_valued(self, v: Var) -> bool:
+        """v's domain is a set of exactly three values: the only ones rule C splits on."""
         d = self._domains.get(v)
-        return d is not None and d.values is not None and (
-            self._two_value or len(d.values) > 2
-        )
+        return d is not None and d.values is not None and len(d.values) == 3
 
     def _add_seeds(self, vs: Iterable[Var]) -> None:
         for v in vs:
@@ -980,10 +976,10 @@ class PolySolver:
                 seen.add(i)
                 # The syntax first, so a flag that gates many data premises
                 # does not expand them all.
-                if not all(self._finite(v) for v in self._step_vars(i)):
+                if not all(self._three_valued(v) for v in self._step_vars(i)):
                     continue
                 vs = self._premise_vars(i)
-                if len(vs) < 2 or not all(self._finite(v) for v in vs):
+                if len(vs) < 2 or not all(self._three_valued(v) for v in vs):
                     continue  # a domain premise, or one that cancelled down
                 coupling.append(i)
                 for w in vs - dom.keys():

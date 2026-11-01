@@ -109,45 +109,35 @@ def test_premise_with_a_column_without_domain_is_skipped():
 
 
 def test_many_fits_cost_less_than_all_of_them():
-    # Eight booleans with four on: 70 combinations fit, and none pins a variable.
-    names = [f"m{i}" for i in range(8)]
-    premises = {f"b{i}": boolean(x) for i, x in enumerate(names)}
-    s = solver(names, {**premises, "sum": sub(add(*names), 4)}, two_value=True)
+    # Six ternary flags summing to 6: 141 combinations fit, and none pins a variable.
+    names = [f"m{i}" for i in range(6)]
+    premises = {f"t{i}": ternary(x) for i, x in enumerate(names)}
+    s = solver(names, {**premises, "sum": sub(add(*names), 6)})
     assert pins(s) == {} and s.case_splits == 1
-    assert s.case_split_nodes < 510  # a full enumeration tries 510
+    assert s.case_split_nodes < 1092  # a full enumeration tries 1092
+
+
+def quad(x):
+    """x * (x - 1) * (x - 2) * (x - 3): four values."""
+    return mul(x, sub(x, 1), sub(x, 2), sub(x, 3))
+
+
+def halves(x):
+    """x * (2x - 1) * (x - 1): 0, 1/2 or 1, like is_load."""
+    return mul(x, sub(mul(2, x), 1), sub(x, 1))
 
 
 @pytest.mark.parametrize(
-    "names, premises, want",
-    [
-        # A ternary flag next to a boolean one, tied by a sum and a selector.
-        (["f", "g"], {"t_f": ternary("f"), "b_g": boolean("g"), "sum": sub(add("f", "g"), 1),
-                      "sel": sub(add("f", mul(2, "g")), 2)}, {"f": 0, "g": 1}),
-        # A sum with a non-unit coefficient is no group.
-        (["a", "b"], {"b_a": boolean("a"), "b_b": boolean("b"),
-                      "sum": sub(add("a", mul(2, "b")), 1)}, {"a": 1, "b": 0}),
-        # Two flags on: the selector still says which.
-        (["add", "sub", "xor", "or", "and"],
-         {**{f"b_{x}": boolean(x) for x in ["add", "sub", "xor", "or", "and"]},
-          "sum": sub(add("add", "sub", "xor", "or", "and"), 2),
-          "sel": sub(add("sub", mul(2, "xor"), mul(3, "or"), mul(4, "and")), 2)},
-         {"add": 1, "sub": 0, "xor": 1, "or": 0, "and": 0}),
-    ],
-    ids=["ternary and boolean", "non-unit sum", "two flags on"],
+    "domain, mid, split",
+    [(boolean, 1, False), (quad, 1, False), (ternary, 1, True), (halves, HALF, True)],
+    ids=["two values", "four values", "0, 1, 2", "0, 1/2, 1"],
 )
-def test_groups_the_one_hot_steps_leave(names, premises, want):
-    assert pins(solver(names, premises, case_split=False)) == {}
-    s = solver(names, premises, two_value=True)  # each group has a boolean
-    assert pins(s) == want and s.case_splits == 1
-
-
-def test_two_value_domains_only_when_asked():
-    # Off by default: a boolean-only group is not searched, a ternary one is.
-    premises = {"b_a": boolean("a"), "b_b": boolean("b"), "sum": sub(add("a", mul(2, "b")), 1)}
-    s = solver(["a", "b"], premises)
-    assert pins(s) == {} and s.case_splits == 0
-    assert pins(solver(["a", "b"], premises, two_value=True)) == {"a": 1, "b": 0}
-    assert pins(toy()) == {"f": 2, "g": 0}
+def test_only_three_value_domains_are_split(domain, mid, split):
+    # a = b and a + b = 2 * mid: one combination fits, if rule C looks.
+    s = solver(["a", "b"], {"d_a": domain("a"), "d_b": domain("b"), "eq": sub("a", "b"),
+                            "sum": sub(add("a", "b"), mul(2, mid))})
+    assert s.case_splits == int(split)
+    assert pins(s) == ({"a": mid, "b": mid} if split else {})
 
 
 # ---------------------------------------------------------------- the loop
@@ -207,9 +197,8 @@ def load_store(code=1, loads=(0, 4), **kw):
     }, **kw)
 
 
-@pytest.mark.parametrize("two_value", [True, False])
-def test_load_store_pinned_before_the_hints(two_value):
-    s = load_store(two_value=two_value)
+def test_load_store_pinned_before_the_hints():
+    s = load_store()
     flags = {"f0": 2, "f1": 0, "f2": 0, "f3": 0}
     assert pins(s) == {"mem_as": 2, "is_valid": 1, **flags, "is_load": 1}
     assert s.case_splits == 1  # the four flags and is_load, in one search
