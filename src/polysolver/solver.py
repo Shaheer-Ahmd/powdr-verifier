@@ -1,57 +1,76 @@
 """PolySolver: decides  P and R and Defs |= (q = 0)  over F_p. Sound, incomplete.
 
-- P: premises, polynomials each read as "= 0".
-- R: ranges lo <= x <= hi on the integer representative of a variable.
-- Defs: definitions for variables that are not declared.
-- Solved: equations x = t for declared x, each checked when added (add_solved).
+The answer to a query q is ``Implied`` (with what it rests on) or
+``Unknown``; there is no "not implied". The solver knows nothing about
+circuits: only variables, polynomials, ranges and definitions.
 
-The answer is ``Implied`` (with a reason) or ``Unknown``. There is no
-"not implied": Unknown only means no rule applied.
+The store:
+- P: premises, polynomials each read as "= 0" (add_premise). Trusted.
+- R: ranges lo <= x <= hi on the integer representative of x (add_range).
+  Trusted.
+- Dom: per variable, lo <= x <= hi and optionally a finite set of values,
+  with tags naming the premises, ranges and solved equations it rests on.
+- Sol: solved equations x = t, from a checked hint (add_solved) or from a
+  domain with one value (a pin). t never mentions a solved variable, and x
+  is replaced by t in the premises (as the rules read them) and in queries.
+- Defs: definitions of fresh variables, passed with a query. No premise
+  mentions them, so they need no check.
 
-Solved equations. A premise is trusted; a solved equation is not: add_solved
-first checks that x = t follows from what is already known, exactly as a
-query would be checked. Only then is x replaced by t, in the premises (as
-the rules see them) and in every later query. The caller picks which
-equations to try and in what order (e.g. the substitutions powdr recorded);
-the solver only checks them. Defs differ: they name fresh variables, so they
-need no check, and no premise can mention them.
+Invariant I: every assignment over F_p that satisfies P and R satisfies
+every fact in Dom and Sol. Hence every premise, as rewritten under Sol,
+holds in every model, and so does every Implied verdict. Each rule below
+keeps I using only facts already in the store, so the rules may fire in any
+order and at any time: scheduling changes what is found and what it costs,
+never soundness.
 
-The solver finds equations by itself in three places: add_premise reads a
-domain off a premise that mentions one variable as written, derive() reads
-domains (a range, or a set of values) off all the premises, and add_solved
-may split cases (rule C below). A domain with one value left, derived or
-given, says x = v; it follows from trusted premises and ranges, so x is
-replaced by v at once, without a check (a pin).
+Rules that add to the store, each a local implication:
+- D (domain): a premise that mentions only x, each of whose top-level
+  factors is a nonzero constant or a*x + b, gives x in {-b/a}: F_p has no
+  zero divisors. So x - c pins x, and x(x - 1) gives {0, 1}.
+- G (group): a premise x_1 + ... + x_n - c with c in {0, 1} and every x_i
+  in [0, 1]. The integer sum is in [0, n] and n < p, so it is c: with c = 0
+  every x_i is 0, a single x_1 is c, and otherwise exactly one x_i is 1
+  (the premise is a group).
+- Sel: a premise w_0 + sum w_x * x over members of a group reads w_0 + w_j
+  for the member j that is 1. Every member whose weight (0 if absent) is
+  not -w_0 is 0; if one member is left, it is 1.
+- C (case split): premises Q over variables that each have a set of three
+  values. Every model, restricted to the variables of Q, is a solution of Q
+  over those sets, so x = v holds if every solution has x = v
+  (enumeration.fixed_values). Leaving premises out of Q loses completeness
+  only.
+- Collapse: a domain with one value v gives x = v, which goes into Sol.
+- Hint: x = t goes into Sol only once rule N or S proves x - t.
+A contradiction (an empty domain, Sel with no member left that can be 1, C
+with no solution) means P and R have no model, so anything follows. The
+policy is to use nothing (C's are counted).
 
-derive() steps, each sound on its own:
-- Domain: a premise that mentions one variable x, and whose top-level factors
-  are each a nonzero constant or a*x + b, says x is one of the -b/a (F_p has
-  no zero divisors): x - c pins x, x(x - 1) gives {0, 1}.
-- G: a premise x_1 + ... + x_n - c with c in {0, 1} and every x_i in [0, 1].
-  As n < p, the integer sum is c: with c = 0 every x_i is 0, a single member
-  is c, and otherwise exactly one x_i is 1 (a group).
-- Sel: a linear premise w_0 + sum w_x * x over members of one group comes to
-  w_0 + w_j for the member j that is 1, so w_j = -w_0. Every member whose
-  weight (0 if absent) differs is 0; if only one member is left, it is 1.
+Rules that answer a query, q rewritten under Sol and Defs, cheapest first:
+- N (normalize): q has the same zero key as a premise, so they differ by a
+  nonzero factor.
+- S (no-wrap split): a premise G * (c1*a1 + ... + cn*an) with ranged a_i
+  whose weighted sum cannot reach p implies G * a_j = 0 for every j.
 
-derive() stops: domains only shrink and a variable is replaced at most once.
+The contract that keeps each rule local:
+- D, G, Sel and C change the store only through _reduce_domain, with tags
+  naming every premise and domain they read (_premise_tags, _range_tags).
+  G's group index only says where Sel should look; Sel re-reads the group.
+- _substitute is called only for pins (_substitute_collapsed) and for
+  checked hints (_check_solved).
 
-Rule C (case split), in add_solved, when N and S cannot decide x = t and x
-has a set of three values: a premise whose variables all have a set of three
-values couples them, and x's group is what such premises reach from x. In
-every model the group takes one combination of values that fits them all,
-so a variable with the same value in every combination that fits is pinned
-(enumeration.fixed_values). Leaving a premise out is sound, so one with any
-other variable is skipped. After the pins, derive()'s work list runs again
-and x = t is checked once more.
+Triggers, which are scheduling only:
+- add_premise: D on a premise that mentions one variable as written.
+- derive(), a work list (_drain): D, G and Sel on every premise whose
+  reading changed: added, rewritten by a substitution, or with a variable
+  newly in [0, 1] or in a new group.
+- add_solved: if N and S leave x - t Unknown and x is unsolved with a set
+  of three values, C searches x's group once; if that pins anything, the
+  work list runs and x - t is checked again. The caller picks the hints and
+  their order (e.g. the substitutions powdr recorded).
 
-Rules, cheapest first:
-- N (normalize): q has the same zero key as one premise.
-- S (no-wrap split): a premise G * (c1*a1 + ... + cn*an) with ranged a_i whose
-  weighted sum cannot wrap past p implies G * a_j = 0 for every j.
-
-The solver knows nothing about circuits: only variables, polynomials,
-ranges and definitions.
+Termination: domains only shrink and a variable is substituted at most
+once, so the work list runs empty. C runs at most once per hint, within
+CASE_SPLIT_GROUP_CAP cases and CASE_SPLIT_NODE_CAP values tried.
 """
 
 from __future__ import annotations
@@ -238,14 +257,16 @@ class PolySolver:
         x must be declared. The check is an ordinary query of x - t against
         the current state. On Implied, x is replaced by t in the premises (as
         the rules see them), in earlier solved equations and in all later
-        queries. On Unknown nothing changes: the equation is rejected, which
-        costs completeness only. If x is already solved (e.g. pinned by
-        derive), the query compares its value with t, and an Implied
-        verdict also changes nothing. If the check is Unknown and x has a set
-        of three values, rule C searches x's group once; if that pins
-        anything, the work list runs and x = t is checked again. Every
-        verdict goes into ``solved_log``, with whether it agreed with a value
-        x already had.
+        queries. On Unknown the equation is rejected, which costs
+        completeness only. If x is already solved (e.g. pinned by derive),
+        the query compares its value with t, and an Implied verdict changes
+        nothing. If the check is Unknown and x has a set of three values,
+        rule C searches x's group once; if that pins anything, the work list
+        runs and x = t is checked again (C's pins stay either way). An
+        Implied verdict names the solved equations that rewrote x - t, so a
+        hint that agrees with a pin from C names the premises behind it.
+        Every verdict goes into ``solved_log``, with whether it agreed with a
+        value x already had.
         """
         agreed = self.solved_agreed
         verdict = self._add_solved(x, t, tag)
@@ -348,6 +369,8 @@ class PolySolver:
     ) -> bool:
         """Intersect v's domain with [lo, hi] and ``values``; True if that narrowed it.
 
+        The rules D, G, Sel and C change the store only through this, and
+        ``tags`` names what they read.
         An empty intersection means the premises contradict each other; the
         domain is then left as it was. When one value is left, v is queued for
         _substitute_collapsed (the listener).
@@ -375,7 +398,7 @@ class PolySolver:
         return True
 
     def _substitute_collapsed(self) -> None:
-        """Replace every variable whose domain collapsed to one value by that value."""
+        """Collapse: replace every variable whose domain has one value v by v (I gives x = v)."""
         while self._collapsed:
             v = self._collapsed.pop()
             if v in self._solved:
@@ -772,7 +795,16 @@ class PolySolver:
     # ------------------------------------------------------------ derive
 
     def _step(self, i: int) -> None:
-        """The domain step, G and Sel for premise i, as it reads under the solved equations."""
+        """The work list's step on premise i, as it reads under the solved equations.
+
+        One variable: rule D. Otherwise, if every variable is in [0, 1],
+        rule G and then Sel. Rule G: the premise reads x_1 + ... + x_n - c
+        with unit weights and c in {0, 1}. Side condition: n < p, true as a
+        key has at most max_terms terms; so the integer sum, in [0, n], is c.
+        Conclusion: with c = 0 every x_i is 0; with n = 1, x_1 = 1; otherwise
+        exactly one x_i is 1, and the premise is recorded as a group for
+        Sel. Tags: the premise and the members' domains.
+        """
         vs = self._step_vars(i)
         if len(vs) == 1:
             self._domain_step(i, *vs)
@@ -814,7 +846,15 @@ class PolySolver:
         return self._current_vars(i)
 
     def _domain_step(self, i: int, x: Var) -> None:
-        """Premise i mentions only x: x is one of its roots."""
+        """Rule D: premise i, under the solved equations, mentions only x.
+
+        Premise: each top-level factor, as written and reduced under the
+        solved equations, is a nonzero constant or a*x + b; failing that, the
+        key is x - c or x^2 - x. Conclusion: x is one of the roots. Side
+        condition: none, as F_p has no zero divisors. Tags: the premise and
+        the solved equations that rewrite it. The constants and one_hot
+        switches say which conclusions are used.
+        """
         roots = self._factor_roots(i, x)
         if roots is None:
             # Not linear factors as written (x*x - x, or a cancellation): the key.
@@ -861,7 +901,15 @@ class PolySolver:
         return tuple(sorted(roots)) or None  # no linear factor: never 0
 
     def _narrow_by_selector(self, i: int, w: dict[Var, int], c0: int) -> None:
-        """Step Sel: premise i, c0 + sum w_x * x, over the members of a group."""
+        """Rule Sel: premise i reads c0 + sum w_x * x over members of a group.
+
+        Premises: i, and a group g, re-read now (unit weights, sum 1, every
+        member in [0, 1]), with every variable of i a member. Exactly one
+        member j is 1 and the rest are 0, so i reads c0 + w_j = 0.
+        Conclusion: every member whose weight (0 if absent) is not -c0 is 0;
+        if one member is left, it is 1. None left: the premises contradict
+        each other, and nothing is used. Tags: i, g and the members' domains.
+        """
         groups = set.intersection(*(self._group_index.get(x, set()) for x in w))
         for g in sorted(groups - {i}):
             # Re-read the group: pins since it was found may have changed it.
@@ -942,9 +990,15 @@ class PolySolver:
         return d is not None and d.values is not None and len(d.values) == 3
 
     def _case_split(self, x: Var) -> bool:
-        """Rule C: pin each variable of x's group that has one value in every fit.
+        """Rule C: pin each variable of x's group that has one value in every solution.
 
-        True if it pinned any; they wait in _collapsed to be substituted.
+        Premises: the coupling premises Q, as rewritten, and the sets of
+        their variables. Every model, restricted to the variables of Q, is a
+        solution of Q over those sets, and fixed_values gives x = v only if
+        every solution has x = v. Conclusion: x = v, tagged with Q and the
+        sets. No solution: the premises contradict each other; counted, and
+        nothing is used. True if it pinned any; they wait in _collapsed to
+        be substituted.
         """
         start = time.perf_counter()
         try:
@@ -974,7 +1028,14 @@ class PolySolver:
             self.case_split_seconds += time.perf_counter() - start
 
     def _case_split_group(self, x: Var) -> tuple[dict, list[int]] | None:
-        """(values of each variable, coupling premise ids) of x's group; None if declined."""
+        """Rule C's scan: (each variable's set of values, coupling premise ids) for x.
+
+        A coupling premise mentions, under the solved equations, two or more
+        variables, each with a set of three values; x's group is what such
+        premises reach from x. C is sound for any subset of the premises;
+        the whole group matters for completeness only. None if there is no
+        coupling premise, or more than CASE_SPLIT_GROUP_CAP cases.
+        """
         dom = {x: sorted(self._domains[x].values)}
         cases = len(dom[x])
         coupling: list[int] = []
