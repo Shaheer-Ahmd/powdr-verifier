@@ -16,11 +16,12 @@ equations to try and in what order (e.g. the substitutions powdr recorded);
 the solver only checks them. Defs differ: they name fresh variables, so they
 need no check, and no premise can mention them.
 
-The solver finds equations by itself only when the caller asks: derive()
-reads domains (a range, or a set of values) off the premises, and
-add_solved may split cases (rule C below). A domain with one value left,
-derived or given, says x = v; it follows from trusted premises and ranges,
-so x is replaced by v at once, without a check (a pin).
+The solver finds equations by itself in three places: add_premise reads a
+domain off a premise that mentions one variable as written, derive() reads
+domains (a range, or a set of values) off all the premises, and add_solved
+may split cases (rule C below). A domain with one value left, derived or
+given, says x = v; it follows from trusted premises and ranges, so x is
+replaced by v at once, without a check (a pin).
 
 derive() steps, each sound on its own:
 - Domain: a premise that mentions one variable x, and whose top-level factors
@@ -200,17 +201,25 @@ class PolySolver:
     # ------------------------------------------------------------ inputs
 
     def add_premise(self, e: Expr, tag: str) -> None:
-        """Assert ``e = 0``. Trusted: the caller vouches for it."""
+        """Assert ``e = 0``. Trusted: the caller vouches for it.
+
+        A premise that mentions one variable x as written gives x's domain at
+        once (the domain step). derive() reads it again, as it reads any
+        premise: one with more variables can mention only x after a pin.
+        """
         vs = self._declared_vars(e, "premise")
         idx = len(self._premises)
         prem = _Premise(tag, e, frozenset(vs))
         self._premises.append(prem)
-        # Index by the variables as written. Nothing is expanded here: rule N
-        # and rule S expand a premise only when a query first needs it.
+        # Index by the variables as written. Rules N and S expand a premise
+        # only when a query first needs it.
         for v in vs:
             self._by_var[v].append(idx)
         self._pending.add(idx)  # for the next derive()
         self._unknown.clear()  # an earlier Unknown might now be provable
+        if len(prem.vars) == 1 and vs[0] not in self._solved:
+            self._domain_step(idx, vs[0])
+            self._substitute_collapsed()
 
     def add_range(self, x: str, lo: int, hi: int, tag: str) -> None:
         """Assert ``lo <= x <= hi``; a second range on x intersects with the first.
@@ -359,11 +368,8 @@ class PolySolver:
             return False
         self._domains[v] = _Domain(lo, hi, values, list(tags))
         self._unknown.clear()
-        # Newly in [0, 1] (a premise over v may be a group now), or a new or
-        # smaller set: the premises over v are read again.
-        newly_01 = hi <= 1 and (old is None or old.hi > 1)
-        if newly_01 or values != (old.values if old is not None else None):
-            self._requeue_vars([v])
+        if hi <= 1 and (old is None or old.hi > 1):
+            self._requeue_vars([v])  # newly in [0, 1]: a premise over v may be a group now
         if lo == hi and v not in self._solved:
             self._collapsed.append(v)
         return True
@@ -392,10 +398,10 @@ class PolySolver:
         """Run derive()'s work list until it is empty.
 
         Every premise is looked at once, then again whenever something it
-        depends on changes: one of its variables gets a domain within [0, 1]
-        or a smaller set, joins a group, or is replaced by its value. Between
-        runs, ranges and hints queue the premises they change for the next
-        one. Domains only shrink and a variable is replaced at most once, so
+        depends on changes: one of its variables gets a domain within [0, 1],
+        joins a group, or is replaced by its value. Between runs, ranges and
+        hints queue the premises they change for the next one. Domains only
+        shrink and a variable is replaced at most once, so
         the list runs empty, and then no premise can give anything new. A
         premise is expanded only if its variables, as it reads now, could fit
         a step: one variable (domain), or all of them within [0, 1] (G, Sel);
