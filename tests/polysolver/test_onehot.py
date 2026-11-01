@@ -72,8 +72,9 @@ def test_xor_instance():
 
 
 def test_nothing_without_the_pass():
+    # add_premise gives the flags their domains; only derive() pins them.
     s = alu(2, run=False)
-    assert s.pinned == 0 and not s._domains
+    assert s.pinned == 0 and all(values(s, x) == {0, 1} for x in FLAGS)
     assert isinstance(s.implies(sub("xor", 1)), Unknown)
 
 
@@ -185,11 +186,12 @@ def test_flag_pins_unlock_a_gated_premise():
 
 
 def test_one_member_group():
-    # a is pinned to 0 by a range, so the group reads b - 1.
+    # a is pinned to 0 by a range, so the group reads b - 1. a's domain came
+    # from its booleanity at add time, and the range narrowed it: both count.
     premises = [("b_a", boolean("a")), ("b_b", boolean("b")), ("sum", sub(add("a", "b"), 1))]
     s = solver(["a", "b"], premises, ranges=[("a", 0, 0)])
     assert pins(s) == {"a": 0, "b": 1}
-    assert s.implies(sub("b", 1)).solved == ("b_b", "r_a", "sum")
+    assert s.implies(sub("b", 1)).solved == ("b_a", "b_b", "r_a", "sum")
 
 
 def test_range_recheck_before_booleanity():
@@ -263,9 +265,11 @@ def test_domains_only_intersect():
 
 
 def test_rule_s_uses_booleanity_ranges():
+    # The booleanity premises give a and b their ranges as they are added.
     premises = [("b_a", boolean("a")), ("b_b", boolean("b")), ("g_sum", mul("g", add("a", "b")))]
-    assert isinstance(solver(["a", "b", "g"], premises, run=False).implies(mul("g", "a")), Unknown)
-    v = solver(["a", "b", "g"], premises).implies(mul("g", "a"))
+    off = solver(["a", "b", "g"], premises, run=False, one_hot=False)
+    assert isinstance(off.implies(mul("g", "a")), Unknown)
+    v = solver(["a", "b", "g"], premises, run=False).implies(mul("g", "a"))
     assert v.rule == "nowrap-split" and v.ranges == ("a", "b")
 
 
@@ -292,11 +296,26 @@ def ternary(x):
 
 
 def test_domains_from_written_factors():
+    # All at add_premise: derive() finds nothing more.
     s = solver(["f", "c", "x"], [
         ("t_f", ternary("f")), ("c2", mul("c", sub("c", 255))), ("x", sub(mul(3, "x"), 6)),
-    ])
+    ], run=False)
     assert values(s, "f") == {0, 1, 2} and values(s, "c") == {0, 255}
     assert pins(s) == {"x": 2} and s.constants_solved == 1 and s.pinned == 0
+    assert s.derive() == 0
+
+
+def test_c51_gets_its_domain_only_after_a_pin():
+    # 2099512 step 000. c51 mentions is_valid and imm_sign as written, so
+    # add_premise skips it. Once c32 and c57 pin is_valid = 1, derive() reads
+    # it as imm_sign^2 - imm_sign; then c66 pins imm_sign = 0 (with constants
+    # off, c66 alone does not: it needs imm_sign within [0, 1]).
+    premises = [("c32", boolean("is_valid")), ("c57", sub(1, "is_valid")),
+                ("c51", mul("is_valid", "imm_sign", sub("imm_sign", 1))), ("c66", sub("imm_sign", 0))]
+    s = solver(["is_valid", "imm_sign"], premises, run=False, constants=False)
+    assert pins(s) == {"is_valid": 1} and values(s, "imm_sign") is None
+    s.derive()
+    assert pins(s) == {"is_valid": 1, "imm_sign": 0}
 
 
 def test_gated_domain_once_the_gate_is_pinned():

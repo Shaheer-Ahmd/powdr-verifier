@@ -18,8 +18,8 @@ def sub(a, b):
     return [a, "-", b]
 
 
-def solver(given, premises=()):
-    s = PolySolver(VarTable(), declared=given)
+def solver(given, premises=(), **kw):
+    s = PolySolver(VarTable(), declared=given, **kw)
     for i, e in enumerate(premises):
         s.add_premise(e, tag=f"p{i}")
     return s
@@ -95,8 +95,9 @@ def test_back_substitution_keeps_values_reduced():
 
 def test_premise_found_through_a_solved_value():
     # Premise p1 mentions only y (and a constant); after y := a + b its key
-    # mentions a and b, which p1 never mentions as written.
-    s = solver({"y", "a", "b"}, [sub("y", add("a", "b")), sub("y", 5)])
+    # mentions a and b, which p1 never mentions as written. With constants
+    # on, p1 would pin y = 5 as it is added.
+    s = solver({"y", "a", "b"}, [sub("y", add("a", "b")), sub("y", 5)], constants=False)
     assert isinstance(s.add_solved("y", add("a", "b"), tag="h:y"), Implied)
     v = s.implies(sub(add("a", "b"), 5))
     assert v.rule == "normalize" and v.premises == ("p1",) and v.solved == ("h:y",)
@@ -124,9 +125,11 @@ def test_gated_premise_becomes_usable():
 # ---------------------------------------------------------------- constants (derive)
 
 def test_constants_pinned_in_turn():
-    # pc0 is pinned; pc1 - pc0 - 4 becomes a pin once pc0 is known.
+    # pc0 is pinned as its premise is added; pc1 - pc0 - 4 becomes a pin in
+    # derive(), once pc0 is known.
     s = solver({"pc0", "pc1"}, [sub("pc1", add("pc0", 4)), sub("pc0", 100)])
-    assert s.derive() == 2 and s.constants_solved == 2 and s.pinned == 0
+    assert s.constants_solved == 1
+    assert s.derive() == 1 and s.constants_solved == 2 and s.pinned == 0
     v = s.implies(sub("pc1", 104))
     # pc1's pin rests on p0 as rewritten by pc0's pin, which came from p1.
     assert v.rule == "trivial" and v.solved == ("p0", "p1")
@@ -134,7 +137,7 @@ def test_constants_pinned_in_turn():
 
 def test_constants_scaled_and_zero():
     s = solver({"x", "y"}, [sub(mul(3, "x"), 12), mul(5, "y")])  # 3x = 12, 5y = 0
-    assert s.derive() == 2
+    assert s.constants_solved == 2  # as they are added
     assert s.implies(sub("x", 4)).rule == "trivial"
     assert s.implies("y").rule == "trivial"
 
@@ -147,7 +150,7 @@ def test_constants_leave_the_rest():
 
 def test_hint_agrees_with_a_constant():
     s = solver({"x", "y"}, [sub("x", 2), sub("y", add("x", 1))])
-    assert s.derive() == 2  # x = 2, then y = 3
+    assert s.derive() == 1  # x = 2 as it is added, then y = 3
     assert isinstance(s.add_solved("x", 2, tag="h:x"), Implied)
     assert s.solved_agreed == 1 and s.solved_rejected == 0
 
