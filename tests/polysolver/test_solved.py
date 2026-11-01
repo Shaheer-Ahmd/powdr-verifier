@@ -52,7 +52,7 @@ def test_every_verdict_is_logged():
     s = solver({"x", "a", "b"}, [sub("x", "a")])
     no = s.add_solved("x", "b", tag="h:x")
     ok = s.add_solved("x", "a", tag="h:x")
-    s.derive()  # nothing to pin, so nothing more is logged
+    s.propagate()  # nothing to pin, so nothing more is logged
     assert s.solved_log == [("h:x", no, False), ("h:x", ok, False)]
     assert isinstance(no, Unknown) and isinstance(ok, Implied)
 
@@ -122,14 +122,14 @@ def test_gated_premise_becomes_usable():
     assert s.implies(L).rule == "normalize"
 
 
-# ---------------------------------------------------------------- constants (derive)
+# ---------------------------------------------------------------- constants (rule D)
 
 def test_constants_pinned_in_turn():
     # pc0 is pinned as its premise is added; pc1 - pc0 - 4 becomes a pin in
-    # derive(), once pc0 is known.
+    # propagate(), once pc0 is known.
     s = solver({"pc0", "pc1"}, [sub("pc1", add("pc0", 4)), sub("pc0", 100)])
     assert s.constants_solved == 1
-    assert s.derive() == 1 and s.constants_solved == 2 and s.pinned == 0
+    assert s.propagate() == 1 and s.constants_solved == 2 and s.pinned == 0
     v = s.implies(sub("pc1", 104))
     # pc1's pin rests on p0 as rewritten by pc0's pin, which came from p1.
     assert v.rule == "trivial" and v.solved == ("p0", "p1")
@@ -145,12 +145,12 @@ def test_constants_scaled_and_zero():
 def test_constants_leave_the_rest():
     # Two variables, a square, a product: none of them pins a variable.
     s = solver({"x", "y", "z"}, [sub("x", "y"), mul("z", sub("z", 1)), mul("x", "y")])
-    assert s.derive() == 0 and s.solved_count == 0
+    assert s.propagate() == 0 and s.solved_count == 0
 
 
 def test_hint_agrees_with_a_constant():
     s = solver({"x", "y"}, [sub("x", 2), sub("y", add("x", 1))])
-    assert s.derive() == 1  # x = 2 as it is added, then y = 3
+    assert s.propagate() == 1  # x = 2 as it is added, then y = 3
     assert isinstance(s.add_solved("x", 2, tag="h:x"), Implied)
     assert s.solved_agreed == 1 and s.solved_rejected == 0
 
@@ -158,9 +158,9 @@ def test_hint_agrees_with_a_constant():
 def test_hint_turns_a_premise_into_a_constant():
     # y + x - a - 3 mentions a until the hint x := a cancels it: then y = 3.
     s = solver({"x", "y", "a"}, [sub("x", "a"), sub(add("y", "x"), add("a", 3))])
-    assert s.derive() == 0
+    assert s.propagate() == 0
     assert isinstance(s.add_solved("x", "a", tag="h:x"), Implied)
-    assert s.derive() == 1 and s.derive_pins == [0, 1]
+    assert s.propagate() == 1 and s.propagate_pins == [0, 1]
     v = s.implies(sub("y", 3))
     assert v.rule == "trivial" and v.solved == ("h:x", "p1")
 

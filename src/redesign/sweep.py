@@ -130,8 +130,8 @@ class Report:
     hints_accepted: int = 0  # solved equations PolySolver checked and kept
     hints_agreed: int = 0  # of those, equal to a value x already had (a pin): no substitution
     hints_rejected: int = 0  # hints whose check failed (not used)
-    constants_solved: int = 0  # variables pinned by a premise x - c (derive)
-    pinned: int = 0  # variables pinned otherwise: booleanity, groups, selectors (derive)
+    constants_solved: int = 0  # variables pinned by a premise x - c (rule D)
+    pinned: int = 0  # variables pinned otherwise: rules O and C, collapsed ranges
     pinned_after_hints: int = 0  # of both, those pinned by the run after the hints
     case_splits: int = 0  # groups rule C searched (at hint checks)
     case_split_nodes: int = 0  # values it tried
@@ -323,7 +323,7 @@ def sweep(
     report.premises_split = solver.premises_split
     report.constants_solved = solver.constants_solved
     report.pinned = solver.pinned
-    report.pinned_after_hints = sum(solver.derive_pins[1:])
+    report.pinned_after_hints = sum(solver.propagate_pins[1:])
     report.case_splits = solver.case_splits
     report.case_split_nodes = solver.case_split_nodes
     report.case_split_capped = solver.case_split_capped
