@@ -359,11 +359,8 @@ class PolySolver:
             return False
         self._domains[v] = _Domain(lo, hi, values, list(tags))
         self._unknown.clear()
-        # Newly in [0, 1] (a premise over v may be a group now), or a new or
-        # smaller set: the premises over v are read again.
-        newly_01 = hi <= 1 and (old is None or old.hi > 1)
-        if newly_01 or values != (old.values if old is not None else None):
-            self._requeue_vars([v])
+        if hi <= 1 and (old is None or old.hi > 1):
+            self._requeue_vars([v])  # newly in [0, 1]: a premise over v may be a group now
         if lo == hi and v not in self._solved:
             self._collapsed.append(v)
         return True
@@ -392,10 +389,10 @@ class PolySolver:
         """Run derive()'s work list until it is empty.
 
         Every premise is looked at once, then again whenever something it
-        depends on changes: one of its variables gets a domain within [0, 1]
-        or a smaller set, joins a group, or is replaced by its value. Between
-        runs, ranges and hints queue the premises they change for the next
-        one. Domains only shrink and a variable is replaced at most once, so
+        depends on changes: one of its variables gets a domain within [0, 1],
+        joins a group, or is replaced by its value. Between runs, ranges and
+        hints queue the premises they change for the next one. Domains only
+        shrink and a variable is replaced at most once, so
         the list runs empty, and then no premise can give anything new. A
         premise is expanded only if its variables, as it reads now, could fit
         a step: one variable (domain), or all of them within [0, 1] (G, Sel);
