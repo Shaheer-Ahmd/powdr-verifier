@@ -185,6 +185,13 @@ def test_flag_pins_unlock_a_gated_premise():
     assert v.rule == "normalize" and v.premises == ("e0",) and v.solved == ALU_TAGS
 
 
+def test_max_terms_must_be_below_p():
+    # The group part needs n < p, and a key has at most max_terms terms.
+    with pytest.raises(ValueError):
+        PolySolver(VarTable(), declared=["x"], p=7, max_terms=7)
+    PolySolver(VarTable(), declared=["x"], p=7, max_terms=6)
+
+
 def test_one_member_group():
     # a is pinned to 0 by a range, so the group reads b - 1. a's domain came
     # from its booleanity at add time, and the range narrowed it: both count.
