@@ -329,8 +329,8 @@ def sweep(
     report.case_split_capped = solver.case_split_capped
     report.case_split_unsat = solver.case_split_unsat
     report.case_split_ms = round(solver.case_split_seconds * 1000)
-    report.hints_accepted = solver.hints_accepted
-    report.hints_rejected = solver.hints_rejected
+    report.hints_accepted = solver.solved_accepted
+    report.hints_rejected = solver.solved_rejected
     forms = {x: hint_form(t) for x, t in hints}
     report.hints = [
         (
@@ -341,7 +341,7 @@ def sweep(
             "" if isinstance(v, Implied) else v.note,
             forms.get(tag.removeprefix(HINT_TAG)),
         )
-        for tag, v, agreed in solver.hint_log
+        for tag, v, agreed in solver.solved_log
         if tag.startswith(HINT_TAG)
     ]
     report.hints_agreed = sum(h[2] for h in report.hints)

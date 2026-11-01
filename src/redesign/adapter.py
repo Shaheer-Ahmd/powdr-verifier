@@ -6,7 +6,7 @@ from src.polysolver import Expr, PolySolver, VarTable
 
 from .circuit import Circuit, byte_ranges
 
-HINT_TAG = "hint:"  # tag prefix of powdr's substitutions, in verdicts and hint_log
+HINT_TAG = "hint:"  # tag prefix of powdr's substitutions, in verdicts and solved_log
 
 
 def reference_solver(
@@ -45,6 +45,6 @@ def reference_solver(
             s.add_range(x, lo, hi, tag=f"{ref.label}:bytes:{x}")
     s.propagate()
     for x, t in hints:
-        s.add_hint(x, t, tag=f"{HINT_TAG}{x}")
+        s.add_solved(x, t, tag=f"{HINT_TAG}{x}")
     s.propagate()  # a hint can turn a premise into x - c
     return s

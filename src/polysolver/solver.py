@@ -10,8 +10,8 @@ The store:
   Trusted.
 - Dom: per variable, lo <= x <= hi and optionally a finite set of values,
   with tags naming the premises, ranges and solved equations it rests on.
-- Sol: solved equations x = t, from a checked hint (add_hint) or from a
-  domain with one value (a pin). t never mentions a solved variable, and x
+- Sol: solved equations x = t, from a checked equation (add_solved) or
+  from a domain with one value (a pin). t never mentions a solved variable, and x
   is replaced by t in the premises (as the rules read them) and in queries.
 - Defs: definitions of fresh variables, passed with a query. No premise
   mentions them, so they need no check.
@@ -41,7 +41,8 @@ Rules that add to the store, each a local implication:
   (enumeration.fixed_values). Leaving premises out of Q loses completeness
   only.
 - Collapse: a domain with one value v gives x = v, which goes into Sol.
-- Hint: x = t goes into Sol only once rule N or S proves x - t.
+- Checked equation: x = t (add_solved) goes into Sol only once rule N or S
+  proves x - t.
 A contradiction (an empty domain, no group member left that can be 1, C
 with no solution) means P and R have no model, so anything follows. The
 policy is to use nothing (C's are counted).
@@ -58,21 +59,21 @@ The contract that keeps each rule local:
   O's group index only says where its selector part should look, and that
   part re-reads the group.
 - _substitute is called only for pins (_substitute_pins) and for
-  checked hints (_check_hint).
+  checked equations (_check_solved).
 
 Triggers, which are scheduling only:
 - add_premise: D on a premise that mentions one variable as written.
 - propagate(), a work list (_run_queue): D and O on every premise whose
   reading changed: added, rewritten by a substitution, or with a variable
   newly in [0, 1] or in a new group.
-- add_hint: if N and S leave x - t Unknown and x is unsolved with a set
+- add_solved: if N and S leave x - t Unknown and x is unsolved with a set
   of three values, C searches x's group once; if that pins anything, the
-  work list runs and x - t is checked again. The caller picks the hints and
-  their order (e.g. the substitutions powdr recorded).
+  work list runs and x - t is checked again. The caller picks the
+  equations and their order.
 
 Termination: domains only shrink and a variable is substituted at most
-once, so the work list runs empty. C runs at most once per hint, within
-CASE_SPLIT_GROUP_CAP cases and CASE_SPLIT_NODE_CAP values tried.
+once, so the work list runs empty. C runs at most once per add_solved call,
+within CASE_SPLIT_GROUP_CAP cases and CASE_SPLIT_NODE_CAP values tried.
 """
 
 from __future__ import annotations
@@ -172,7 +173,7 @@ class PolySolver:
         self.p = p
         self.max_terms = max_terms
         # Switches: rule D's pins from x - c (constants), rule D's sets of
-        # several values and rule O (one_hot), add_hint's rule C (case_split).
+        # several values and rule O (one_hot), add_solved's rule C (case_split).
         self._use_constants, self._use_one_hot = constants, one_hot
         self._use_case_split = case_split
         self.declared: frozenset[Var] = frozenset(table.var(n) for n in declared)
@@ -185,7 +186,7 @@ class PolySolver:
         # premises grow; Unknown may not, so that cache is cleared on every add.
         self._implied: dict[P.Key, Implied] = {}
         self._unknown: dict[P.Key, Unknown] = {}
-        # Solved equations x = t (add_hint). t is kept fully reduced: it never
+        # Solved equations x = t (add_solved). t is kept fully reduced: it never
         # mentions a solved variable, so one lookup replaces x for good.
         self._solved: dict[Var, P.Poly] = {}
         self._solved_tag: dict[Var, tuple[str, ...]] = {}
@@ -199,15 +200,16 @@ class PolySolver:
         self._new_pins: list[Var] = []  # domains with one value, not yet substituted
         self._pinned_by_constant: set[Var] = set()  # pinned by rule D from x - c
         # propagate()'s work list while it runs; between runs, what the next one
-        # must look at (new premises, and those that ranges or hints changed).
+        # must look at (new premises, and those that ranges or solved
+        # equations changed).
         self._queue: deque[int] | None = None
         self._queued: set[int] = set()
         self._pending: set[int] = set()
         self.premises_expanded = 0  # premise keys computed (rule N)
         self.premises_split = 0  # premises split into factors (rule S)
-        self.hints_accepted = 0  # add_hint calls accepted (also values equal to a pin)
-        self.hints_agreed = 0  # of those, x already had that value: nothing changed
-        self.hints_rejected = 0  # add_hint calls whose check failed
+        self.solved_accepted = 0  # add_solved calls accepted (also values equal to a pin)
+        self.solved_agreed = 0  # of those, x already had that value: nothing changed
+        self.solved_rejected = 0  # add_solved calls whose check failed
         self.constants_solved = 0  # variables pinned by a premise x - c
         self.pinned = 0  # variables pinned otherwise (a collapsed domain)
         self.propagate_pins: list[int] = []  # variables pinned by each propagate() call
@@ -216,8 +218,8 @@ class PolySolver:
         self.case_split_capped = 0  # groups or searches over the caps
         self.case_split_unsat = 0  # searches with no fit: the premises contradict each other
         self.case_split_seconds = 0.0  # its own time
-        # (tag, verdict, agreed with x's value) per add_hint call
-        self.hint_log: list[tuple[str, Verdict, bool]] = []
+        # (tag, verdict, agreed with x's value) per add_solved call
+        self.solved_log: list[tuple[str, Verdict, bool]] = []
 
     # ------------------------------------------------------------ inputs
 
@@ -253,7 +255,7 @@ class PolySolver:
         self._narrow_domain(v, lo, hi, [tag])
         self._substitute_pins()
 
-    def add_hint(self, x: str, t: Expr, tag: str) -> Verdict:
+    def add_solved(self, x: str, t: Expr, tag: str) -> Verdict:
         """Check that ``x = t`` is implied; if so, replace x by t from now on.
 
         x must be declared. The check is an ordinary query of x - t against
@@ -265,20 +267,20 @@ class PolySolver:
         nothing. If the check is Unknown and x has a set of three values,
         rule C searches x's group once; if that pins anything, the work list
         runs and x = t is checked again (C's pins stay either way). An
-        Implied verdict names the solved equations that rewrote x - t, so a
-        hint that agrees with a pin from C names the premises behind it.
-        Every verdict goes into ``hint_log``, with whether it agreed with a
+        Implied verdict names the solved equations that rewrote x - t, so an
+        equation that agrees with a pin from C names the premises behind it.
+        Every verdict goes into ``solved_log``, with whether it agreed with a
         value x already had.
         """
-        agreed = self.hints_agreed
-        verdict = self._add_hint(x, t, tag)
-        self.hint_log.append((tag, verdict, self.hints_agreed > agreed))
+        agreed = self.solved_agreed
+        verdict = self._add_solved(x, t, tag)
+        self.solved_log.append((tag, verdict, self.solved_agreed > agreed))
         return verdict
 
-    def _add_hint(self, x: str, t: Expr, tag: str) -> Verdict:
+    def _add_solved(self, x: str, t: Expr, tag: str) -> Verdict:
         (xv,) = self._declared_vars(x, "solved variable")
         self._declared_vars(t, "solved value")
-        verdict = self._check_hint(xv, t, tag)
+        verdict = self._check_solved(xv, t, tag)
         if (
             isinstance(verdict, Unknown)
             and self._use_case_split
@@ -288,12 +290,12 @@ class PolySolver:
         ):
             self._substitute_pins()
             self._run_queue()
-            verdict = self._check_hint(xv, t, tag)  # a comparison, if x is pinned now
+            verdict = self._check_solved(xv, t, tag)  # a comparison, if x is pinned now
         if isinstance(verdict, Unknown):
-            self.hints_rejected += 1
+            self.solved_rejected += 1
         return verdict
 
-    def _check_hint(self, xv: Var, t: Expr, tag: str) -> Verdict:
+    def _check_solved(self, xv: Var, t: Expr, tag: str) -> Verdict:
         """Rules N and S on x - t; if Implied and x is unsolved, replace x by t."""
         x = self.table.name(xv)
         try:
@@ -307,8 +309,8 @@ class PolySolver:
             verdict = self._decide(k)
             if not isinstance(verdict, Implied):
                 return Unknown(f"{x} is already solved", "already-solved")
-            self.hints_accepted += 1
-            self.hints_agreed += 1
+            self.solved_accepted += 1
+            self.solved_agreed += 1
             return self._with_solved_tags(verdict, rewrote)
         # t must not mention x, or "replace x by t" would not remove x.
         if xv in P.variables_of(rhs):
@@ -322,7 +324,7 @@ class PolySolver:
             self._substitute(xv, rhs, (tag,))
         except P.ExpansionLimit:
             return Unknown("expansion limit (back-substitution)", "expansion-limit")
-        self.hints_accepted += 1
+        self.solved_accepted += 1
         return verdict
 
     def _with_solved_tags(self, verdict: Implied, vs: Iterable[Var]) -> Implied:
@@ -425,12 +427,12 @@ class PolySolver:
         Every premise is looked at once, then again whenever something it
         depends on changes: one of its variables gets a domain within [0, 1],
         joins a group, or is replaced by its value. Between runs, ranges and
-        hints queue the premises they change for the next one. Domains only
-        shrink and a variable is replaced at most once, so the list runs
-        empty, and then no premise can give anything new. A premise is
-        expanded only if its variables, as it reads now, could fit a rule:
-        one variable (D), or all of them within [0, 1] (O); _vars_now says
-        when they are read off the key instead.
+        solved equations queue the premises they change for the next one.
+        Domains only shrink and a variable is replaced at most once, so the
+        list runs empty, and then no premise can give anything new. A
+        premise is expanded only if its variables, as it reads now, could fit
+        a rule: one variable (D), or all of them within [0, 1] (O); _vars_now
+        says when they are read off the key instead.
         """
         todo, self._pending = sorted(self._pending), set()
         self._queue, self._queued = deque(), set()
@@ -827,7 +829,8 @@ class PolySolver:
                 (x,) = w
                 self._narrow_domain(x, 1, 1, tags)
             else:
-                # Every member, also one a hint has swapped in since the last look.
+                # Every member, also one a solved equation has swapped in
+                # since the last look.
                 new = [x for x in w if i not in self._group_index[x]]
                 for x in new:
                     self._group_index[x].add(i)
@@ -838,7 +841,7 @@ class PolySolver:
         """The variables premise i mentions under the solved equations.
 
         Read off the syntax, unless a solved variable can have removed one: a
-        gate solved to 0 removes what it gates (f*y with f := 0), and a hint's
+        gate solved to 0 removes what it gates (f*y with f := 0), and a solved
         value can cancel a variable (y + x - a - 3 with x := a). Then they
         are read off the premise's key.
         """

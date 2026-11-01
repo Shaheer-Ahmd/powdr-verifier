@@ -1,5 +1,5 @@
-"""Rule C at a hint check: a hint about a variable with three values that N and S
-cannot decide first pins each variable with one value in every fit of its group."""
+"""Rule C in add_solved: an equation x = t that N and S cannot decide, with x
+three-valued, first pins each variable with one value in every fit of x's group."""
 from functools import reduce
 
 import pytest
@@ -55,8 +55,8 @@ def solver(names, premises, **kw):
     return s
 
 
-def hint(s, x, t):
-    return s.add_hint(x, t, tag=f"h:{x}")
+def solve(s, x, t):
+    return s.add_solved(x, t, tag=f"h:{x}")
 
 
 def pins(s):
@@ -77,35 +77,35 @@ def toy(extra=None, names=(), **kw):
 
 # ---------------------------------------------------------------- the trigger
 
-def test_a_hint_pins_the_group_and_agrees():
+def test_an_equation_pins_the_group_and_agrees():
     s = toy()
     assert pins(s) == {}  # propagate() never splits
-    v = hint(s, "f", 2)
+    v = solve(s, "f", 2)
     assert pins(s) == {"f": 2, "g": 0} and s.case_splits == 1 and s.pinned == 2
     # Agreed with the pin, and naming the premises behind it.
-    assert s.hints_agreed == 1 and v.rule == "trivial"
+    assert s.solved_agreed == 1 and v.rule == "trivial"
     assert v.solved == ("dec", "sum", "t_f", "t_g")
-    # g is solved now: its hint is a comparison, with no search.
-    assert hint(s, "g", 0).rule == "trivial" and s.case_splits == 1
+    # g is solved now: add_solved compares, with no search.
+    assert solve(s, "g", 0).rule == "trivial" and s.case_splits == 1
 
 
-def test_a_wrong_hint_is_rejected_and_the_pins_stay():
+def test_a_wrong_equation_is_rejected_and_the_pins_stay():
     s = toy()
-    v = hint(s, "f", 1)
+    v = solve(s, "f", 1)
     assert isinstance(v, Unknown) and v.kind == "already-solved"
-    assert s.hints_rejected == 1 and pins(s) == {"f": 2, "g": 0}
+    assert s.solved_rejected == 1 and pins(s) == {"f": 2, "g": 0}
 
 
 def test_no_search_when_n_or_s_decides():
     s = toy()
-    assert hint(s, "f", sub(2, "g")).rule == "normalize"  # the premise f + g - 2
+    assert solve(s, "f", sub(2, "g")).rule == "normalize"  # the premise f + g - 2
     assert s.case_splits == 0
 
 
 def test_the_work_list_runs_after_the_pins():
-    # Once f = 2, (f - 1)*y - 3 reads y - 3: y is pinned before the next hint.
+    # Once f = 2, (f - 1)*y - 3 reads y - 3: y is pinned before add_solved returns.
     s = toy(extra={"lin": sub(mul(sub("f", 1), "y"), 3)}, names=["y"])
-    hint(s, "f", 2)
+    solve(s, "f", 2)
     assert pins(s) == {"f": 2, "g": 0, "y": 3}
     assert s.propagate_pins == [0]  # propagate()'s count is only its own
 
@@ -114,7 +114,7 @@ def test_the_work_list_runs_after_the_pins():
 
 def test_two_fits_that_agree_on_nothing_pin_nothing():
     s = solver(["f", "g"], {"t_f": ternary("f"), "t_g": ternary("g"), "sum": sub(add("f", "g"), 2)})
-    assert isinstance(hint(s, "f", 0), Unknown)
+    assert isinstance(solve(s, "f", 0), Unknown)
     assert pins(s) == {} and s.case_splits == 1
     # It stops at the second fit: f = 0 (g = 0, 1, 2), then f = 1 (g = 0, 1).
     assert s.case_split_nodes == 7
@@ -125,19 +125,19 @@ def test_variables_every_fit_agrees_on_are_pinned():
     tern3 = {f"t_{x}": ternary(x) for x in "fgh"}
     s = solver(["f", "g", "h"], {**tern3, "sum": sub(add("f", "g"), 2),
                                  "hsum": sub(mul("h", add("f", "g")), 4)})
-    assert hint(s, "h", 2).rule == "trivial" and pins(s) == {"h": 2}
+    assert solve(s, "h", 2).rule == "trivial" and pins(s) == {"h": 2}
     # Agreeing in the first two fits is not enough: 2k = f(f - 1) is 0 for
     # f = 0 and f = 1, but 1 for f = 2.
     tern3 = {f"t_{x}": ternary(x) for x in "fgk"}
     s = solver(["f", "g", "k"], {**tern3, "sum": sub(add("f", "g"), 2),
                                  "k": sub(mul(2, "k"), mul("f", sub("f", 1)))})
-    assert isinstance(hint(s, "k", 0), Unknown)
+    assert isinstance(solve(s, "k", 0), Unknown)
     assert pins(s) == {} and s.case_splits == 1
 
 
 def test_a_contradiction_is_counted_and_pins_nothing():
     s = toy(extra={"eq": sub("f", "g")})  # f = g = 1 is the only sum, and fails dec
-    assert isinstance(hint(s, "f", 2), Unknown)
+    assert isinstance(solve(s, "f", 2), Unknown)
     assert pins(s) == {} and s.case_splits == 1 and s.case_split_unsat == 1
 
 
@@ -145,15 +145,15 @@ def test_group_over_the_cap():
     names = [f"x{i}" for i in range(8)]  # 3^8 cases
     premises = {f"t{i}": ternary(x) for i, x in enumerate(names)}
     s = solver(names, {**premises, "sum": sub(add(*names), 16)})
-    assert isinstance(hint(s, "x0", 2), Unknown)
+    assert isinstance(solve(s, "x0", 2), Unknown)
     assert pins(s) == {} and s.case_split_capped == 1 and s.case_splits == 0
 
 
 def test_premise_with_a_column_without_domain_is_skipped():
     s = toy(extra={"data": mul(sub("f", 1), sub("w", "r"))}, names=["w", "r"])
-    hint(s, "f", 2)
+    solve(s, "f", 2)
     assert pins(s) == {"f": 2, "g": 0}
-    assert hint(s, "w", "r").rule == "normalize"  # f = 2 ungated it
+    assert solve(s, "w", "r").rule == "normalize"  # f = 2 ungated it
 
 
 def test_many_fits_cost_less_than_all_of_them():
@@ -161,7 +161,7 @@ def test_many_fits_cost_less_than_all_of_them():
     names = [f"m{i}" for i in range(6)]
     premises = {f"t{i}": ternary(x) for i, x in enumerate(names)}
     s = solver(names, {**premises, "sum": sub(add(*names), 6)})
-    assert isinstance(hint(s, "m0", 1), Unknown)
+    assert isinstance(solve(s, "m0", 1), Unknown)
     assert pins(s) == {} and s.case_splits == 1
     assert s.case_split_nodes < 1092  # a full enumeration tries 1092
 
@@ -175,12 +175,12 @@ def test_only_three_value_domains_are_split(domain, mid, split):
     # a = b and a + b = 2 * mid: one combination fits, if rule C looks.
     s = solver(["a", "b"], {"d_a": domain("a"), "d_b": domain("b"), "eq": sub("a", "b"),
                             "sum": sub(add("a", "b"), mul(2, mid))})
-    v = hint(s, "a", mid)
+    v = solve(s, "a", mid)
     assert s.case_splits == int(split) and isinstance(v, Implied) == split
     assert pins(s) == ({"a": mid, "b": mid} if split else {})
 
 
-# ---------------------------------------------------------------- pins between hints
+# ---------------------------------------------------------------- pins between equations
 
 def test_a_pin_can_make_a_new_coupling_premise():
     # a1 + a2 = 2 has three fits. f*y + a1 - a2 couples a1 and a2 only once
@@ -192,9 +192,9 @@ def test_a_pin_can_make_a_new_coupling_premise():
         "dec_f": sub(add(mul("h", "h"), "f"), 4),
         "link": add(mul("f", "y"), sub("a1", "a2")),
     })
-    assert isinstance(hint(s, "a1", 1), Unknown)  # three fits
-    assert hint(s, "f", 0).rule == "trivial"
-    assert hint(s, "a2", 1).rule == "trivial"  # link reads a1 - a2 now
+    assert isinstance(solve(s, "a1", 1), Unknown)  # three fits
+    assert solve(s, "f", 0).rule == "trivial"
+    assert solve(s, "a2", 1).rule == "trivial"  # link reads a1 - a2 now
     assert pins(s) == {"a1": 1, "a2": 1, "f": 0, "h": 2}
     assert s.case_splits == 3  # a's group, f's, then a's again
 
@@ -207,7 +207,7 @@ def test_a_gated_domain_is_there_for_the_search():
         "t_f": ternary("f"),
         "e": sub("e", 1),
     })
-    assert hint(s, "f", 2).rule == "trivial"
+    assert solve(s, "f", 2).rule == "trivial"
     assert pins(s) == {"e": 1, "f": 2, "g": 2}
 
 
@@ -248,8 +248,8 @@ def test_load_store_pinned_at_the_first_flag_hint():
     # by f0 = 2, proves the last.
     flags = {"f0": 2, "f1": 0, "f2": 0, "f3": 0}
     hints = [("mem_as", 2), ("is_valid", 1), *flags.items(), ("is_load", 1), ("w", "r")]
-    verdicts = [hint(s, x, t) for x, t in hints]
-    assert s.case_splits == 1 and s.hints_rejected == 0 and s.hints_agreed == 7
+    verdicts = [solve(s, x, t) for x, t in hints]
+    assert s.case_splits == 1 and s.solved_rejected == 0 and s.solved_agreed == 7
     assert {"opcode", "load", "sum", "gate"} <= set(verdicts[2].solved)
     assert verdicts[-1].rule == "normalize"
 
@@ -261,6 +261,6 @@ def test_load_store_pinned_at_the_first_flag_hint():
 )
 def test_load_store_variants(code, flags, is_load):
     s = load_store(code=code)
-    assert hint(s, "f0", flags[0]).rule == "trivial"
+    assert solve(s, "f0", flags[0]).rule == "trivial"
     want = {**dict(zip(FLAGS, flags)), "is_load": is_load}
     assert {x: pins(s)[x] for x in want} == want

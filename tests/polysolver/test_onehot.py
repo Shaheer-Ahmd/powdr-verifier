@@ -171,9 +171,9 @@ def test_flag_hints_after_propagate():
     # powdr's hints for one instance, in its file order: each equals a pin.
     s = alu(2)
     hints = [("and", 0), ("add", 0), ("sub", 0), ("xor", 1), ("or", 0)]
-    rules = [s.add_hint(x, t, tag=f"h:{x}").rule for x, t in hints]
+    rules = [s.add_solved(x, t, tag=f"h:{x}").rule for x, t in hints]
     assert rules == ["trivial"] * 5
-    assert s.hints_accepted == s.hints_agreed == 5 and s.hints_rejected == 0
+    assert s.solved_accepted == s.solved_agreed == 5 and s.solved_rejected == 0
     assert s.solved_count == 5 and s.pinned == 5
 
 
@@ -181,7 +181,7 @@ def test_flag_pins_unlock_a_gated_premise():
     # (sum of flags) * (x - y): with the flags pinned it reads x - y.
     gated = mul(add(*FLAGS), sub("x", "y"))
     s = alu(2, extra=[gated], names=["x", "y"])
-    v = s.add_hint("x", "y", tag="h:x")
+    v = s.add_solved("x", "y", tag="h:x")
     assert v.rule == "normalize" and v.premises == ("e0",) and v.solved == ALU_TAGS
 
 
@@ -276,8 +276,8 @@ def test_rule_s_uses_booleanity_ranges():
 
 def test_agreeing_hint_is_implied():
     s = alu(2)
-    assert isinstance(s.add_hint("xor", 1, tag="h"), Implied)
-    v = s.add_hint("xor", 0, tag="h")
+    assert isinstance(s.add_solved("xor", 1, tag="h"), Implied)
+    v = s.add_solved("xor", 0, tag="h")
     assert isinstance(v, Unknown) and v.kind == "already-solved"
 
 
@@ -361,6 +361,6 @@ def test_hint_swaps_a_group_member():
                  ("sel", sub(add("b", mul(2, "c")), 2))]
     s = solver(["a", "b", "c", "x"], premises)
     assert s.propagate_pins == [0]
-    assert isinstance(s.add_hint("x", "c", tag="h:x"), Implied)
+    assert isinstance(s.add_solved("x", "c", tag="h:x"), Implied)
     assert s.propagate() == 3
     assert pins(s) == {"a": 0, "b": 0, "c": 1, "x": 1}
