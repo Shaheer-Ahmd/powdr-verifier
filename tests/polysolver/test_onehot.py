@@ -1,4 +1,4 @@
-"""derive(): domains, flag groups and selectors pin flags; collapsed domains are substituted."""
+"""propagate(): domains, flag groups and selectors pin flags; collapsed domains are substituted."""
 from functools import reduce
 
 import pytest
@@ -36,14 +36,14 @@ def selector(weights, k):
 
 
 def solver(names, premises, ranges=(), run=True, **kw):
-    """Premises tagged by name, then ranges, then derive() without rule C (test_casesplit)."""
+    """Premises tagged by name, then ranges, then propagate() without rule C (test_casesplit)."""
     s = PolySolver(VarTable(), declared=names, **{"case_split": False, **kw})
     for tag, e in premises:
         s.add_premise(e, tag=tag)
     for x, lo, hi in ranges:
         s.add_range(x, lo, hi, tag=f"r_{x}")
     if run:
-        s.derive()
+        s.propagate()
     return s
 
 
@@ -71,8 +71,8 @@ def test_xor_instance():
     assert isinstance(s.implies("xor"), Unknown)
 
 
-def test_nothing_without_the_pass():
-    # add_premise gives the flags their domains; only derive() pins them.
+def test_nothing_pinned_without_propagate():
+    # add_premise gives the flags their domains; only propagate() pins them.
     s = alu(2, run=False)
     assert s.pinned == 0 and all(values(s, x) == {0, 1} for x in FLAGS)
     assert isinstance(s.implies(sub("xor", 1)), Unknown)
@@ -167,13 +167,13 @@ def test_premise_order_does_not_matter():
     assert pins(s) == pins(alu(2))
 
 
-def test_flag_hints_after_the_pass():
+def test_flag_hints_after_propagate():
     # powdr's hints for one instance, in its file order: each equals a pin.
     s = alu(2)
     hints = [("and", 0), ("add", 0), ("sub", 0), ("xor", 1), ("or", 0)]
-    rules = [s.add_solved(x, t, tag=f"h:{x}").rule for x, t in hints]
+    rules = [s.add_hint(x, t, tag=f"h:{x}").rule for x, t in hints]
     assert rules == ["trivial"] * 5
-    assert s.solved_accepted == s.solved_agreed == 5 and s.solved_rejected == 0
+    assert s.hints_accepted == s.hints_agreed == 5 and s.hints_rejected == 0
     assert s.solved_count == 5 and s.pinned == 5
 
 
@@ -181,7 +181,7 @@ def test_flag_pins_unlock_a_gated_premise():
     # (sum of flags) * (x - y): with the flags pinned it reads x - y.
     gated = mul(add(*FLAGS), sub("x", "y"))
     s = alu(2, extra=[gated], names=["x", "y"])
-    v = s.add_solved("x", "y", tag="h:x")
+    v = s.add_hint("x", "y", tag="h:x")
     assert v.rule == "normalize" and v.premises == ("e0",) and v.solved == ALU_TAGS
 
 
@@ -201,8 +201,9 @@ def test_range_recheck_before_booleanity():
 
 
 def test_range_recheck_after_a_pin():
-    # The shape at keccak 2099512 step 000: x(x - 1) is gated by v, and v is
-    # pinned only inside the pass. x is first skipped, then x = 0.
+    # The shape at keccak 2099512 step 000: x(x - 1) is gated by v. b_x
+    # mentions v and x as written, so add_premise skips it; once v = 1,
+    # propagate() reads it as x(x - 1), and then x = 0.
     premises = [
         ("x", "x"),
         ("b_v", boolean("v")),
@@ -223,8 +224,8 @@ def test_gated_group(gate_on):
 
 
 def test_screen_skips_premises_with_other_variables():
-    # The gated premise mentions x, y, z, which are not 0-or-1 variables: the
-    # pass does not expand it. Once flags are pinned to 0 it is read off its
+    # The gated premise mentions x, y, z, which are not 0-or-1 variables:
+    # propagate() does not expand it. Once flags are pinned to 0 it is read off its
     # key, once, since a gate at 0 could have removed variables.
     extra = [mul(add(*FLAGS), add(mul("x", "y"), "z"))]
     s = alu(2, extra=extra, names=["x", "y", "z"])
@@ -254,14 +255,14 @@ def test_domains_only_intersect():
     s = solver(["x"], [], ranges=[("x", 0, 10)], run=False)
     x = s.table.var("x")
     # A set filtered by the range; its bounds are its min and max.
-    assert s._reduce_domain(x, 0, s.p - 1, ["s"], values=frozenset({1, 5, 20}))
+    assert s._narrow_domain(x, 0, s.p - 1, ["s"], values=frozenset({1, 5, 20}))
     assert s._domains[x][:3] == (1, 5, frozenset({1, 5}))
-    assert not s._reduce_domain(x, 0, 10, ["t"])  # nothing new
-    assert not s._reduce_domain(x, 0, 10, ["t"], values=frozenset({7}))  # contradiction: kept
+    assert not s._narrow_domain(x, 0, 10, ["t"])  # nothing new
+    assert not s._narrow_domain(x, 0, 10, ["t"], values=frozenset({7}))  # contradiction: kept
     # A range filters the set too, down to one value.
-    assert s._reduce_domain(x, 2, 10, ["u"])
+    assert s._narrow_domain(x, 2, 10, ["u"])
     assert s._domains[x] == (5, 5, frozenset({5}), ["r_x", "s", "u"])
-    assert s._collapsed == [x]
+    assert s._new_pins == [x]
 
 
 def test_rule_s_uses_booleanity_ranges():
@@ -275,12 +276,12 @@ def test_rule_s_uses_booleanity_ranges():
 
 def test_agreeing_hint_is_implied():
     s = alu(2)
-    assert isinstance(s.add_solved("xor", 1, tag="h"), Implied)
-    v = s.add_solved("xor", 0, tag="h")
+    assert isinstance(s.add_hint("xor", 1, tag="h"), Implied)
+    v = s.add_hint("xor", 0, tag="h")
     assert isinstance(v, Unknown) and v.kind == "already-solved"
 
 
-# ---------------------------------------------------------------- the domain step
+# ---------------------------------------------------------------- rule D
 
 HALF = (P + 1) // 2  # 1/2 in F_p
 
@@ -296,25 +297,25 @@ def ternary(x):
 
 
 def test_domains_from_written_factors():
-    # All at add_premise: derive() finds nothing more.
+    # All at add_premise: propagate() finds nothing more.
     s = solver(["f", "c", "x"], [
         ("t_f", ternary("f")), ("c2", mul("c", sub("c", 255))), ("x", sub(mul(3, "x"), 6)),
     ], run=False)
     assert values(s, "f") == {0, 1, 2} and values(s, "c") == {0, 255}
     assert pins(s) == {"x": 2} and s.constants_solved == 1 and s.pinned == 0
-    assert s.derive() == 0
+    assert s.propagate() == 0
 
 
 def test_c51_gets_its_domain_only_after_a_pin():
     # 2099512 step 000. c51 mentions is_valid and imm_sign as written, so
-    # add_premise skips it. Once c32 and c57 pin is_valid = 1, derive() reads
+    # add_premise skips it. Once c32 and c57 pin is_valid = 1, propagate() reads
     # it as imm_sign^2 - imm_sign; then c66 pins imm_sign = 0 (with constants
     # off, c66 alone does not: it needs imm_sign within [0, 1]).
     premises = [("c32", boolean("is_valid")), ("c57", sub(1, "is_valid")),
                 ("c51", mul("is_valid", "imm_sign", sub("imm_sign", 1))), ("c66", sub("imm_sign", 0))]
     s = solver(["is_valid", "imm_sign"], premises, run=False, constants=False)
     assert pins(s) == {"is_valid": 1} and values(s, "imm_sign") is None
-    s.derive()
+    s.propagate()
     assert pins(s) == {"is_valid": 1, "imm_sign": 0}
 
 
@@ -359,7 +360,7 @@ def test_hint_swaps_a_group_member():
     premises += [("sum", sub(add("a", "b", "x"), 1)), ("eq", sub("x", "c")),
                  ("sel", sub(add("b", mul(2, "c")), 2))]
     s = solver(["a", "b", "c", "x"], premises)
-    assert s.derive_pins == [0]
-    assert isinstance(s.add_solved("x", "c", tag="h:x"), Implied)
-    assert s.derive() == 3
+    assert s.propagate_pins == [0]
+    assert isinstance(s.add_hint("x", "c", tag="h:x"), Implied)
+    assert s.propagate() == 3
     assert pins(s) == {"a": 0, "b": 0, "c": 1, "x": 1}

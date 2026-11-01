@@ -47,16 +47,16 @@ def halves(x):
 
 
 def solver(names, premises, **kw):
-    """Premises tagged by their keys, then derive()."""
+    """Premises tagged by their keys, then propagate()."""
     s = PolySolver(VarTable(), declared=names, **kw)
     for tag, e in premises.items():
         s.add_premise(e, tag=tag)
-    s.derive()
+    s.propagate()
     return s
 
 
 def hint(s, x, t):
-    return s.add_solved(x, t, tag=f"h:{x}")
+    return s.add_hint(x, t, tag=f"h:{x}")
 
 
 def pins(s):
@@ -79,11 +79,11 @@ def toy(extra=None, names=(), **kw):
 
 def test_a_hint_pins_the_group_and_agrees():
     s = toy()
-    assert pins(s) == {}  # derive() never splits
+    assert pins(s) == {}  # propagate() never splits
     v = hint(s, "f", 2)
     assert pins(s) == {"f": 2, "g": 0} and s.case_splits == 1 and s.pinned == 2
     # Agreed with the pin, and naming the premises behind it.
-    assert s.solved_agreed == 1 and v.rule == "trivial"
+    assert s.hints_agreed == 1 and v.rule == "trivial"
     assert v.solved == ("dec", "sum", "t_f", "t_g")
     # g is solved now: its hint is a comparison, with no search.
     assert hint(s, "g", 0).rule == "trivial" and s.case_splits == 1
@@ -93,7 +93,7 @@ def test_a_wrong_hint_is_rejected_and_the_pins_stay():
     s = toy()
     v = hint(s, "f", 1)
     assert isinstance(v, Unknown) and v.kind == "already-solved"
-    assert s.solved_rejected == 1 and pins(s) == {"f": 2, "g": 0}
+    assert s.hints_rejected == 1 and pins(s) == {"f": 2, "g": 0}
 
 
 def test_no_search_when_n_or_s_decides():
@@ -107,7 +107,7 @@ def test_the_work_list_runs_after_the_pins():
     s = toy(extra={"lin": sub(mul(sub("f", 1), "y"), 3)}, names=["y"])
     hint(s, "f", 2)
     assert pins(s) == {"f": 2, "g": 0, "y": 3}
-    assert s.derive_pins == [0]  # derive()'s count is only its own
+    assert s.propagate_pins == [0]  # propagate()'s count is only its own
 
 
 # ---------------------------------------------------------------- the search
@@ -200,7 +200,7 @@ def test_a_pin_can_make_a_new_coupling_premise():
 
 
 def test_a_gated_domain_is_there_for_the_search():
-    # g's domain is gated by e; derive() pins e = 1, and then f = g = 2 fits alone.
+    # g's domain is gated by e; propagate() pins e = 1, and then f = g = 2 fits alone.
     s = solver(["e", "f", "g"], {
         "c": sub(add("f", "g"), 4),
         "t_g": mul("e", ternary("g")),
@@ -242,14 +242,14 @@ def load_store(code=1, loads=(0, 4), **kw):
 
 def test_load_store_pinned_at_the_first_flag_hint():
     s = load_store()
-    assert pins(s) == {"mem_as": 2, "is_valid": 1}  # derive(): x - c only
+    assert pins(s) == {"mem_as": 2, "is_valid": 1}  # propagate(): x - c only
     # powdr's hints, in its order. f0's searches once and pins the four flags
     # and is_load; the later flag hints agree, and the data premise, ungated
     # by f0 = 2, proves the last.
     flags = {"f0": 2, "f1": 0, "f2": 0, "f3": 0}
     hints = [("mem_as", 2), ("is_valid", 1), *flags.items(), ("is_load", 1), ("w", "r")]
     verdicts = [hint(s, x, t) for x, t in hints]
-    assert s.case_splits == 1 and s.solved_rejected == 0 and s.solved_agreed == 7
+    assert s.case_splits == 1 and s.hints_rejected == 0 and s.hints_agreed == 7
     assert {"opcode", "load", "sum", "gate"} <= set(verdicts[2].solved)
     assert verdicts[-1].rule == "normalize"
 
