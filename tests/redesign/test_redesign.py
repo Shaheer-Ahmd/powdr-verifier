@@ -114,8 +114,9 @@ def test_opcode_flags_pinned_by_one_hot(one_hot, hints, undecided):
 )
 def test_load_store_flags_pinned_by_rule_c(case_split, hints, undecided):
     # solver pass: a load/store flag is 0, 1 or 2, and only all the flag
-    # premises together say which (rule C). derive() pins the flags before the
-    # hints; the data hints then follow by rule N, and with them the lookups.
+    # premises together say which (rule C). The first flag hint of each
+    # instance pins the flags; the data hints then follow by rule N, and with
+    # them the lookups.
     (cmp,) = check("keccak", "2099828", "002", "003", ("completeness",),
                    use_case_split=case_split)
     assert (cmp.hints_accepted, cmp.hints_rejected) == hints

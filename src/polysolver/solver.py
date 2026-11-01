@@ -17,9 +17,10 @@ the solver only checks them. Defs differ: they name fresh variables, so they
 need no check, and no premise can mention them.
 
 The solver finds equations by itself only when the caller asks: derive()
-reads domains (a range, or a set of values) off the premises. A domain with
-one value left, derived or given, says x = v; it follows from trusted
-premises and ranges, so x is replaced by v at once, without a check (a pin).
+reads domains (a range, or a set of values) off the premises, and
+add_solved may split cases (rule C below). A domain with one value left,
+derived or given, says x = v; it follows from trusted premises and ranges,
+so x is replaced by v at once, without a check (a pin).
 
 derive() steps, each sound on its own:
 - Domain: a premise that mentions one variable x, and whose top-level factors
@@ -31,15 +32,17 @@ derive() steps, each sound on its own:
 - Sel: a linear premise w_0 + sum w_x * x over members of one group comes to
   w_0 + w_j for the member j that is 1, so w_j = -w_0. Every member whose
   weight (0 if absent) differs is 0; if only one member is left, it is 1.
-- C (case split), once the steps above have nothing left: a premise whose
-  variables all have a set of three values couples them, and x's group is
-  what such premises reach from x. In every model the group takes one
-  combination of values that fits them all, so a variable with the same value
-  in every combination that fits is pinned. Leaving a premise out is sound,
-  so one with any other variable is skipped.
 
-derive() stops: domains only shrink, a variable is replaced at most once, and
-C searches only after a coupling premise changed (its variables are seeds).
+derive() stops: domains only shrink and a variable is replaced at most once.
+
+Rule C (case split), in add_solved, when N and S cannot decide x = t and x
+has a set of three values: a premise whose variables all have a set of three
+values couples them, and x's group is what such premises reach from x. In
+every model the group takes one combination of values that fits them all,
+so a variable with the same value in every combination that fits is pinned
+(enumeration.fixed_values). Leaving a premise out is sound, so one with any
+other variable is skipped. After the pins, derive()'s work list runs again
+and x = t is checked once more.
 
 Rules, cheapest first:
 - N (normalize): q has the same zero key as one premise.
@@ -52,11 +55,10 @@ ranges and definitions.
 
 from __future__ import annotations
 
-import heapq
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import NamedTuple
 
 from . import poly as P
@@ -147,8 +149,8 @@ class PolySolver:
         self.table = table
         self.p = p
         self.max_terms = max_terms
-        # derive()'s steps: pins from x - c, the one-hot steps (domains of
-        # several values, G and Sel), and rule C over variables with three values.
+        # derive()'s steps: pins from x - c and the one-hot steps (domains of
+        # several values, G and Sel); add_solved's rule C.
         self._use_constants, self._use_one_hot = constants, one_hot
         self._use_case_split = case_split
         self.declared: frozenset[Var] = frozenset(table.var(n) for n in declared)
@@ -179,10 +181,6 @@ class PolySolver:
         self._queue: deque[int] | None = None
         self._queued: set[int] = set()
         self._pending: set[int] = set()
-        # Rule C's seeds: variables of coupling premises popped since their
-        # group was last searched. The heap hands them out by name.
-        self._seeds: set[Var] = set()
-        self._seed_heap: list[tuple[str, Var]] = []
         self.premises_expanded = 0  # premise keys computed (rule N)
         self.premises_split = 0  # premises split into factors (rule S)
         self.solved_accepted = 0  # add_solved calls accepted (also values equal to a pin)
@@ -234,8 +232,11 @@ class PolySolver:
         queries. On Unknown nothing changes: the equation is rejected, which
         costs completeness only. If x is already solved (e.g. pinned by
         derive), the query compares its value with t, and an Implied
-        verdict also changes nothing. Every verdict goes into ``solved_log``,
-        with whether it agreed with a value x already had.
+        verdict also changes nothing. If the check is Unknown and x has a set
+        of three values, rule C searches x's group once; if that pins
+        anything, the work list runs and x = t is checked again. Every
+        verdict goes into ``solved_log``, with whether it agreed with a value
+        x already had.
         """
         agreed = self.solved_agreed
         verdict = self._add_solved(x, t, tag)
@@ -245,31 +246,57 @@ class PolySolver:
     def _add_solved(self, x: str, t: Expr, tag: str) -> Verdict:
         (xv,) = self._declared_vars(x, "solved variable")
         self._declared_vars(t, "solved value")
+        verdict = self._check_solved(xv, t, tag)
+        if (
+            isinstance(verdict, Unknown)
+            and self._use_case_split
+            and xv not in self._solved
+            and self._three_valued(xv)
+            and self._case_split(xv)
+        ):
+            self._substitute_collapsed()
+            self._drain()
+            verdict = self._check_solved(xv, t, tag)  # a comparison, if x is pinned now
+        if isinstance(verdict, Unknown):
+            self.solved_rejected += 1
+        return verdict
+
+    def _check_solved(self, xv: Var, t: Expr, tag: str) -> Verdict:
+        """Rules N and S on x - t; if Implied and x is unsolved, replace x by t."""
+        x = self.table.name(xv)
         try:
             rhs = P.expand(t, self._plain, self.p, self.max_terms)
         except P.ExpansionLimit:
-            return self._reject("expansion limit", "expansion-limit")
+            return Unknown("expansion limit", "expansion-limit")
+        # The solved equations that rewrote x - t, as implies reports them for q.
+        rewrote = [xv, *(self._var(n) for n in variables(t))]
         if xv in self._solved:
             k = P.zkey(P.add(self._solved[xv], rhs, self.p, -1), self.p)
             verdict = self._decide(k)
             if not isinstance(verdict, Implied):
-                return self._reject(f"{x} is already solved", "already-solved")
+                return Unknown(f"{x} is already solved", "already-solved")
             self.solved_accepted += 1
             self.solved_agreed += 1
-            return verdict
+            return self._also_solved(verdict, rewrote)
         # t must not mention x, or "replace x by t" would not remove x.
         if xv in P.variables_of(rhs):
-            return self._reject(f"{x} occurs in its own value", "not-solved")
+            return Unknown(f"{x} occurs in its own value", "not-solved")
         k = P.zkey(P.add(P.var_poly(xv), rhs, self.p, -1), self.p)
         verdict = self._decide(k)
         if not isinstance(verdict, Implied):
-            return self._reject(verdict.note, verdict.kind)
+            return verdict
+        verdict = self._also_solved(verdict, rewrote)  # before x is solved
         try:
             self._substitute(xv, rhs, (tag,))
         except P.ExpansionLimit:
-            return self._reject("expansion limit (back-substitution)", "expansion-limit")
+            return Unknown("expansion limit (back-substitution)", "expansion-limit")
         self.solved_accepted += 1
         return verdict
+
+    def _also_solved(self, verdict: Implied, vs: Iterable[Var]) -> Implied:
+        """``verdict``, also naming the solved equations of the variables ``vs``."""
+        solved = set(verdict.solved) | set(self._solved_tags(vs))
+        return replace(verdict, solved=tuple(sorted(solved)))
 
     def _substitute(self, xv: Var, rhs: P.Poly, tags: tuple[str, ...]) -> None:
         """Replace x by rhs from now on; rhs is fully reduced and does not mention x.
@@ -332,8 +359,8 @@ class PolySolver:
             return False
         self._domains[v] = _Domain(lo, hi, values, list(tags))
         self._unknown.clear()
-        # Newly in [0, 1]: a premise over v may be a group now. A new or smaller
-        # set: one may couple finite domains now (rule C).
+        # Newly in [0, 1] (a premise over v may be a group now), or a new or
+        # smaller set: the premises over v are read again.
         newly_01 = hi <= 1 and (old is None or old.hi > 1)
         if newly_01 or values != (old.values if old is not None else None):
             self._requeue_vars([v])
@@ -355,42 +382,38 @@ class PolySolver:
                 self.pinned += 1
 
     def derive(self) -> int:
-        """Derive domains by the steps in the module docstring; return how many pinned.
+        """Derive domains by the steps in the module docstring; return how many pinned."""
+        before = self.pinned + self.constants_solved
+        self._drain()
+        self.derive_pins.append(self.pinned + self.constants_solved - before)
+        return self.derive_pins[-1]
 
-        A work list: every premise is looked at once, then again whenever
-        something it depends on changes: one of its variables gets a domain
-        within [0, 1], joins a group, or is replaced by its value. Between
-        calls, ranges and hints queue the premises they change for the next
+    def _drain(self) -> None:
+        """Run derive()'s work list until it is empty.
+
+        Every premise is looked at once, then again whenever something it
+        depends on changes: one of its variables gets a domain within [0, 1]
+        or a smaller set, joins a group, or is replaced by its value. Between
+        runs, ranges and hints queue the premises they change for the next
         one. Domains only shrink and a variable is replaced at most once, so
         the list runs empty, and then no premise can give anything new. A
         premise is expanded only if its variables, as it reads now, could fit
         a step: one variable (domain), or all of them within [0, 1] (G, Sel);
         _step_vars says when they are read off the key instead.
         """
-        before = self.pinned + self.constants_solved
         todo, self._pending = sorted(self._pending), set()
         self._queue, self._queued = deque(), set()
         try:
             # One-variable premises first: they hold the x^2 - x that G needs.
             self._enqueue(i for i in todo if len(self._premises[i].vars) == 1)
             self._enqueue(todo)
-            while True:
-                while self._queue:
-                    i = self._queue.popleft()
-                    self._queued.discard(i)
-                    self._step(i)
-                    self._substitute_collapsed()
-                # Rule C, one group at a time, so the cheap steps go first.
-                x = self._next_seed()
-                if x is None:
-                    break
-                if x not in self._solved and self._three_valued(x):
-                    self._case_split(x)
-                    self._substitute_collapsed()
+            while self._queue:
+                i = self._queue.popleft()
+                self._queued.discard(i)
+                self._step(i)
+                self._substitute_collapsed()
         finally:
             self._queue = None
-        self.derive_pins.append(self.pinned + self.constants_solved - before)
-        return self.derive_pins[-1]
 
     @staticmethod
     def _as_pin(k: P.Key | None) -> tuple[Var, int] | None:
@@ -405,10 +428,6 @@ class PolySolver:
             return None
         value = -rest[0][1] if rest else 0
         return lead[0][0], value
-
-    def _reject(self, note: str, kind: str) -> Unknown:
-        self.solved_rejected += 1
-        return Unknown(note, kind)
 
     @property
     def solved_count(self) -> int:
@@ -749,8 +768,6 @@ class PolySolver:
     def _step(self, i: int) -> None:
         """The domain step, G and Sel for premise i, as it reads under the solved equations."""
         vs = self._step_vars(i)
-        if self._use_case_split and len(vs) > 1 and all(self._three_valued(v) for v in vs):
-            self._add_seeds(vs)  # a coupling premise: rule C searches its group
         if len(vs) == 1:
             self._domain_step(i, *vs)
             return
@@ -918,28 +935,16 @@ class PolySolver:
         d = self._domains.get(v)
         return d is not None and d.values is not None and len(d.values) == 3
 
-    def _add_seeds(self, vs: Iterable[Var]) -> None:
-        for v in vs:
-            if v not in self._seeds:
-                self._seeds.add(v)
-                heapq.heappush(self._seed_heap, (self.table.name(v), v))
+    def _case_split(self, x: Var) -> bool:
+        """Rule C: pin each variable of x's group that has one value in every fit.
 
-    def _next_seed(self) -> Var | None:
-        """The seed with the smallest name (names, unlike Var ids, are stable)."""
-        while self._seed_heap:
-            _, v = heapq.heappop(self._seed_heap)
-            if v in self._seeds:  # else a group search already took it
-                self._seeds.discard(v)
-                return v
-        return None
-
-    def _case_split(self, x: Var) -> None:
-        """Rule C: pin each variable of x's group that has one value in every fit."""
+        True if it pinned any; they wait in _collapsed to be substituted.
+        """
         start = time.perf_counter()
         try:
             group = self._case_split_group(x)
             if group is None:
-                return
+                return False
             dom, coupling = group
             self.case_splits += 1
             # Ties in the search order go by name: Var ids depend on the order
@@ -950,15 +955,15 @@ class PolySolver:
             self.case_split_nodes += found.nodes
             if isinstance(found, NoSolution):
                 self.case_split_unsat += 1  # counted, and nothing is used
-                return
+                return False
             if isinstance(found, GaveUp):
                 self.case_split_capped += 1  # what was proved before stays proved
-            if not found.values:
-                return
             tags = [t for i in coupling for t in self._premise_tags(i)]
             tags += self._range_tags(domains)
+            pinned = False
             for w, v in found.values.items():
-                self._reduce_domain(w, v, v, tags, frozenset((v,)))
+                pinned |= self._reduce_domain(w, v, v, tags, frozenset((v,)))
+            return pinned
         finally:
             self.case_split_seconds += time.perf_counter() - start
 
@@ -986,7 +991,6 @@ class PolySolver:
                     dom[w] = sorted(self._domains[w].values)
                     cases *= len(dom[w])
                     todo.append(w)
-                    self._seeds.discard(w)  # searched now, with x
                 if cases > CASE_SPLIT_GROUP_CAP:
                     self.case_split_capped += 1
                     return None

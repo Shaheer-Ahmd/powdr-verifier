@@ -22,13 +22,14 @@ def reference_solver(
 
     The solver first derives domains from the premises and pins what they
     decide (derive): with ``constants`` a premise x - c, with ``one_hot``
-    booleanity, flag groups and selectors, with ``case_split`` a case split
-    over variables with three values each.
+    booleanity, flag groups and selectors.
     ``hints`` are candidate solved equations x = t over reference columns,
     tried in order. The solver checks each one and keeps only those that
     follow from what it already knows (a hint equal to a pin is kept too); a
-    rejected hint costs completeness only. Then it derives again, from the
-    premises the hints changed.
+    rejected hint costs completeness only. With ``case_split``, a hint about
+    a variable with three values that the check cannot decide first gets a
+    case split over the variable's group (rule C). Then the solver derives
+    again, from the premises the hints changed.
     """
     s = PolySolver(
         table,

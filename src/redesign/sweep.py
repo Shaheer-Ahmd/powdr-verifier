@@ -133,7 +133,7 @@ class Report:
     constants_solved: int = 0  # variables pinned by a premise x - c (derive)
     pinned: int = 0  # variables pinned otherwise: booleanity, groups, selectors (derive)
     pinned_after_hints: int = 0  # of both, those pinned by the run after the hints
-    case_splits: int = 0  # groups rule C searched (derive)
+    case_splits: int = 0  # groups rule C searched (at hint checks)
     case_split_nodes: int = 0  # values it tried
     case_split_capped: int = 0  # groups or searches it gave up on (over a cap)
     case_split_unsat: int = 0  # searches with no fit: the premises contradict each other
