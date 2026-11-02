@@ -278,7 +278,6 @@ def _compare(db: SweepDB, run, base, f: Filters, limit: int, top: int) -> list:
         ("hints_rejected", "hints rejected", False),
         ("pinned", "pins", None),
         ("constants_solved", "constants solved", None),
-        ("pinned_after_hints", "  of both, after the hints", None),
         ("case_splits", "rule C searches", None),
         ("case_split_nodes", "  values tried", None),
         ("case_split_capped", "  over a cap", None),

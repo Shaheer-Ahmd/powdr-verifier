@@ -181,7 +181,6 @@ def _as_dict(r: Report) -> dict:
         "hints_rejected": r.hints_rejected,
         "constants_solved": r.constants_solved,
         "pinned": r.pinned,
-        "pinned_after_hints": r.pinned_after_hints,
         "case_splits": r.case_splits,
         "case_split_nodes": r.case_split_nodes,
         "case_split_unsat": r.case_split_unsat,

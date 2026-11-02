@@ -132,7 +132,6 @@ class Report:
     hints_rejected: int = 0  # hints whose check failed (not used)
     constants_solved: int = 0  # variables pinned by a premise x - c (rule D)
     pinned: int = 0  # variables pinned otherwise: rules O and C, collapsed ranges
-    pinned_after_hints: int = 0  # of both, those pinned by the run after the hints
     case_splits: int = 0  # groups rule C searched (at hint checks)
     case_split_nodes: int = 0  # values it tried
     case_split_capped: int = 0  # groups or searches it gave up on (over a cap)
@@ -323,7 +322,6 @@ def sweep(
     report.premises_split = solver.premises_split
     report.constants_solved = solver.constants_solved
     report.pinned = solver.pinned
-    report.pinned_after_hints = sum(solver.propagate_pins[1:])
     report.case_splits = solver.case_splits
     report.case_split_nodes = solver.case_split_nodes
     report.case_split_capped = solver.case_split_capped

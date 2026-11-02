@@ -28,8 +28,7 @@ def reference_solver(
     follow from what it already knows (a hint equal to a pin is kept too); a
     rejected hint costs completeness only. With ``case_split``, a hint about
     a variable with three values that the check cannot decide first gets a
-    case split over the variable's group (rule C). Then the solver
-    propagates again, from the premises the hints changed.
+    case split over the variable's group (rule C).
     """
     s = PolySolver(
         table,
@@ -46,5 +45,4 @@ def reference_solver(
     s.propagate()
     for x, t in hints:
         s.add_solved(x, t, tag=f"{HINT_TAG}{x}")
-    s.propagate()  # a hint can turn a premise into x - c
     return s

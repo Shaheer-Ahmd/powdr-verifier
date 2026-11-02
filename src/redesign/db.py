@@ -88,8 +88,8 @@ CREATE TABLE IF NOT EXISTS steps (
     hints_rejected INTEGER,
     constants_solved INTEGER,
     pinned INTEGER,
-    pinned_after_hints INTEGER,  -- NULL before schema 4, and the four below
-    case_splits INTEGER,
+    pinned_after_hints INTEGER,  -- pins by a propagate() after the hints: schema 4 runs only
+    case_splits INTEGER,         -- NULL before schema 4, and the three below
     case_split_nodes INTEGER,
     case_split_capped INTEGER,
     case_split_ms INTEGER,
@@ -612,7 +612,6 @@ class SweepDB:
             " SUM(s.hints_accepted) AS hints_accepted, SUM(s.hints_agreed) AS hints_agreed,"
             " SUM(s.hints_rejected) AS hints_rejected,"
             " SUM(s.pinned) AS pinned, SUM(s.constants_solved) AS constants_solved,"
-            " SUM(s.pinned_after_hints) AS pinned_after_hints,"
             " SUM(s.case_splits) AS case_splits, SUM(s.case_split_nodes) AS case_split_nodes,"
             " SUM(s.case_split_capped) AS case_split_capped,"
             " SUM(s.case_split_unsat) AS case_split_unsat,"
