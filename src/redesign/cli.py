@@ -53,7 +53,7 @@ def _build_parser() -> argparse.ArgumentParser:
     c.add_argument(
         "--no-case-split",
         action="store_true",
-        help="skip rule C (case split over variables with three values each)",
+        help="skip rule C (a case split over finite sets, started by a hint on a three-valued variable)",
     )
     c.add_argument("--root", type=Path, help="dump root (default: powdr-dumps)")
     c.add_argument("--json", action="store_true", help="machine-readable output")
@@ -82,7 +82,7 @@ def _build_parser() -> argparse.ArgumentParser:
     s.add_argument(
         "--no-case-split",
         action="store_true",
-        help="skip rule C (case split over variables with three values each)",
+        help="skip rule C (a case split over finite sets, started by a hint on a three-valued variable)",
     )
     s.add_argument(
         "--pass",
@@ -179,6 +179,7 @@ def _as_dict(r: Report) -> dict:
         "hints_accepted": r.hints_accepted,
         "hints_agreed": r.hints_agreed,
         "hints_rejected": r.hints_rejected,
+        "hints_on_retry": r.hints_on_retry,
         "constants_solved": r.constants_solved,
         "pinned": r.pinned,
         "case_splits": r.case_splits,
@@ -208,8 +209,8 @@ def _print(r: Report, verbose: bool) -> None:
     )
     print(
         f"{r.direction}: {status}  ({counts}; {r.premises_expanded} premises expanded, {r.premises_split} split"
-        f"; hints {r.hints_accepted} used ({r.hints_agreed} agreed with a pin),"
-        f" {r.hints_rejected} rejected"
+        f"; hints {r.hints_accepted} used ({r.hints_agreed} agreed with a pin,"
+        f" {r.hints_on_retry} on a retry), {r.hints_rejected} rejected"
         f"; {r.constants_solved} constants solved; {r.pinned} pinned"
         f"; rule C: {r.case_splits} searches, {r.case_split_nodes} values tried,"
         f" {r.case_split_unsat} with no fit)"

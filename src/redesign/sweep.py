@@ -130,6 +130,7 @@ class Report:
     hints_accepted: int = 0  # solved equations PolySolver checked and kept
     hints_agreed: int = 0  # of those, equal to a value x already had (a pin): no substitution
     hints_rejected: int = 0  # hints whose check failed (not used)
+    hints_on_retry: int = 0  # of the accepted, those rejected at first
     constants_solved: int = 0  # variables pinned by a premise x - c (rule D)
     pinned: int = 0  # variables pinned otherwise: rules O and C, collapsed ranges
     case_splits: int = 0  # groups rule C searched (at hint checks)
@@ -329,6 +330,7 @@ def sweep(
     report.case_split_ms = round(solver.case_split_seconds * 1000)
     report.hints_accepted = solver.solved_accepted
     report.hints_rejected = solver.solved_rejected
+    report.hints_on_retry = solver.solved_on_retry
     forms = {x: hint_form(t) for x, t in hints}
     report.hints = [
         (

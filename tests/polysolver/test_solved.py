@@ -160,9 +160,52 @@ def test_hint_turns_a_premise_into_a_constant():
     s = solver({"x", "y", "a"}, [sub("x", "a"), sub(add("y", "x"), add("a", 3))])
     assert s.propagate() == 0
     assert isinstance(s.add_solved("x", "a", tag="h:x"), Implied)
-    assert s.propagate() == 1 and s.propagate_pins == [0, 1]
+    # add_solved ran D on the rewritten premise; propagate() finds nothing more.
+    assert s.constants_solved == 1 and s.propagate() == 0
     v = s.implies(sub("y", 3))
     assert v.rule == "trivial" and v.solved == ("h:x", "p1")
+
+
+# ---------------------------------------------------------------- the work list (add_solved_all)
+
+def test_d_runs_on_what_a_hint_rewrote():
+    # a*(b - 1) reads b^2 - b once a := b: b gets {0, 1} with no propagate().
+    s = solver({"a", "b"}, [sub("a", "b"), mul("a", sub("b", 1))])
+    s.propagate()
+    assert isinstance(s.add_solved("a", "b", tag="h:a"), Implied)
+    assert s._domains[s.table.var("b")].values == {0, 1}
+
+
+def test_a_pin_from_d_wakes_an_earlier_rejected_hint():
+    # y := c fails until z = 0 turns (z - 1)*(y - c) into y - c. z = 0 is D's,
+    # on a - w + z once a := w; that hint never touches (z - 1)*(y - c).
+    s = solver(
+        {"a", "w", "z", "y", "c"},
+        [sub("a", "w"), add(sub("a", "w"), "z"), mul(sub("z", 1), sub("y", "c"))],
+    )
+    s.propagate()
+    first, second = s.add_solved_all([("y", "c", "h:y"), ("a", "w", "h:a")])
+    assert first.rule == "normalize" and second.rule == "normalize"
+    assert s.implies("z").rule == "trivial"
+    assert s.solved_on_retry == s.solved_rechecks == 1 and s.solved_rejected == 0
+    assert [(tag, v) for tag, v, _ in s.solved_log] == [("h:y", first), ("h:a", second)]
+
+
+def test_hints_out_of_order_are_all_accepted():
+    # test_check_uses_earlier_solved_equations in one call: y's hint needs x's.
+    s = solver({"x", "y", "a"}, [sub("x", add("a", 1)), sub("y", mul(2, "x"))])
+    verdicts = s.add_solved_all(
+        [("y", add(mul(2, "a"), 2), "h:y"), ("x", add("a", 1), "h:x")]
+    )
+    assert all(isinstance(v, Implied) for v in verdicts)
+    assert s.solved_on_retry == 1 and s.solved_rejected == 0
+
+
+def test_an_unrelated_hint_wakes_nothing():
+    s = solver({"x", "a", "b", "u", "v"}, [sub("x", "a"), sub("u", "v")])
+    no, ok = s.add_solved_all([("x", "b", "h:x"), ("u", "v", "h:u")])
+    assert isinstance(no, Unknown) and isinstance(ok, Implied)
+    assert s.solved_rechecks == 0 and s.solved_rejected == 1
 
 
 # ---------------------------------------------------------------- equality, normal form

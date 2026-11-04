@@ -35,7 +35,7 @@ Rules that add to the store, each a local implication:
   - selector part: a premise w_0 + sum w_x * x over members of a group
     reads w_0 + w_j for the member j that is 1. Every member whose weight
     (0 if absent) is not -w_0 is 0; if one member is left, it is 1.
-- C (case split): premises Q over variables that each have a set of three
+- C (case split): premises Q over variables that each have a finite set of
   values. Every model, restricted to the variables of Q, is a solution of Q
   over those sets, so x = v holds if every solution has x = v
   (enumeration.fixed_values). Leaving premises out of Q loses completeness
@@ -63,21 +63,31 @@ The contract that keeps each rule local:
 
 Triggers, which are scheduling only:
 - add_premise: D on a premise that mentions one variable as written.
-- propagate(), a work list (_run_queue): D and O on every premise whose
-  reading changed: added, rewritten by a substitution, or with a variable
-  newly in [0, 1] or in a new group.
-- add_solved: if N and S leave x - t Unknown and x is unsolved with a set
-  of three values, C searches x's group once; if that pins anything, the
-  work list runs and x - t is checked again. The caller picks the
-  equations and their order.
+- The work list (_run_queue), run by propagate() and add_solved_all. It
+  holds premises and equations, and empties the premises before each
+  equation check:
+  - premises: D and O on every premise whose reading changed: added,
+    rewritten by a substitution, or with a variable newly in [0, 1] or in
+    a new group.
+  - equations: checked by N and S, lowest index first. If x - t is Unknown
+    and x is unsolved with a set of case_split_trigger values (a policy:
+    the caller's, 3 by default), C searches x's group;
+    if that pins anything, the equation is checked again after the pins
+    (without C). A rejected equation waits on its variables and the
+    premises that mention them. A substitution or a narrowed domain
+    there puts it back on the list. The caller picks the equations and
+    their order.
 
 Termination: domains only shrink and a variable is substituted at most
-once, so the work list runs empty. C runs at most once per add_solved call,
-within CASE_SPLIT_GROUP_CAP cases and CASE_SPLIT_NODE_CAP values tried.
+once, so there are finitely many changes. Each one puts a waiting
+equation back at most once, and an accepted one is done, so the work list
+runs empty. C runs at most once per check, within CASE_SPLIT_GROUP_CAP
+cases and CASE_SPLIT_NODE_CAP values tried.
 """
 
 from __future__ import annotations
 
+import heapq
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
@@ -156,6 +166,23 @@ class _Premise:
     sums: list | None = None  # [(factor position, Poly)] for the linear sums
 
 
+@dataclass
+class _Equation:
+    """One x = t of an add_solved_all call, while the work list runs."""
+
+    x: Var
+    t: Expr
+    tag: str
+    written: frozenset  # x and the variables of t, as written
+    verdict: Verdict | None = None  # the latest check's
+    agreed: bool = False  # accepted, and x already had that value
+    rejected: bool = False  # some check was Unknown
+    skip_c: bool = False  # C pinned for the last check: the next one goes without C
+    # What it waits on while rejected: variables and premise ids.
+    wait_vars: frozenset = frozenset()
+    wait_premises: frozenset = frozenset()
+
+
 class PolySolver:
     """Premises and ranges only grow; an Implied verdict therefore stays valid."""
 
@@ -168,11 +195,14 @@ class PolySolver:
         constants: bool = True,
         one_hot: bool = True,
         case_split: bool = True,
+        case_split_trigger: int = 3,
     ):
         # Rule O's group part needs n < p for a sum of n variables. A key has
         # at most max_terms terms, so this makes it hold.
         if max_terms >= p:
             raise ValueError(f"max_terms ({max_terms}) must be below p ({p})")
+        if case_split_trigger < 2:
+            raise ValueError(f"case_split_trigger ({case_split_trigger}) must be at least 2")
         self.table = table
         self.p = p
         self.max_terms = max_terms
@@ -180,6 +210,9 @@ class PolySolver:
         # several values and rule O (one_hot), add_solved's rule C (case_split).
         self._use_constants, self._use_one_hot = constants, one_hot
         self._use_case_split = case_split
+        # Rule C's policy: which equations start a search (x has a set of
+        # this many values). The search itself takes any finite sets.
+        self.case_split_trigger = case_split_trigger
         self.declared: frozenset[Var] = frozenset(table.var(n) for n in declared)
         self._premises: list[_Premise] = []
         # Premise index for rule N: variable -> ids of the premises that mention it.
@@ -203,17 +236,26 @@ class PolySolver:
         self._group_index: dict[Var, set[int]] = defaultdict(set)
         self._new_pins: list[Var] = []  # domains with one value, not yet substituted
         self._pinned_by_constant: set[Var] = set()  # pinned by rule D from x - c
-        # propagate()'s work list while it runs; between runs, what the next one
-        # must look at (new premises, and those that ranges or solved
-        # equations changed).
+        # The work list's premises while it runs; between runs, what the next
+        # one must look at (new premises, and those that ranges and pins changed).
         self._queue: deque[int] | None = None
         self._queued: set[int] = set()
         self._pending: set[int] = set()
+        # Its equations, during an add_solved_all call: a heap of the indices
+        # to check, and the rejected ones, indexed by what they wait on.
+        self._eqs: list[_Equation] = []
+        self._eq_ready: list[int] = []
+        self._eq_queued: set[int] = set()
+        self._waiting: set[int] = set()
+        self._waiting_on_var: dict[Var, set[int]] = defaultdict(set)
+        self._waiting_on_premise: dict[int, set[int]] = defaultdict(set)
         self.premises_expanded = 0  # premise keys computed (rule N)
         self.premises_split = 0  # premises split into factors (rule S)
-        self.solved_accepted = 0  # add_solved calls accepted (also values equal to a pin)
+        self.solved_accepted = 0  # equations accepted (also values equal to a pin)
         self.solved_agreed = 0  # of those, x already had that value: nothing changed
-        self.solved_rejected = 0  # add_solved calls whose check failed
+        self.solved_rejected = 0  # equations whose last check failed
+        self.solved_rechecks = 0  # checks of an equation put back after a reject
+        self.solved_on_retry = 0  # of the accepted, those rejected first
         self.constants_solved = 0  # variables pinned by a premise x - c
         self.pinned = 0  # variables pinned otherwise (a collapsed domain)
         self.propagate_pins: list[int] = []  # variables pinned by each propagate() call
@@ -222,7 +264,7 @@ class PolySolver:
         self.case_split_capped = 0  # groups or searches over the caps
         self.case_split_unsat = 0  # searches with no fit: the premises contradict each other
         self.case_split_seconds = 0.0  # its own time
-        # (tag, verdict, agreed with x's value) per add_solved call
+        # (tag, last verdict, agreed with x's value) per equation, in call order
         self.solved_log: list[tuple[str, Verdict, bool]] = []
 
     # ------------------------------------------------------------ inputs
@@ -231,7 +273,7 @@ class PolySolver:
         """Assert ``e = 0``. Trusted: the caller vouches for it.
 
         A premise that mentions one variable x as written gives x's domain at
-        once (rule D). propagate() reads it again, as it reads any premise:
+        once (rule D). The work list reads it again, as it reads any premise:
         one with more variables can mention only x after a pin.
         """
         vs = self._declared_vars(e, "premise")
@@ -242,7 +284,7 @@ class PolySolver:
         # only when a query first needs it.
         for v in vs:
             self._by_var[v].append(idx)
-        self._pending.add(idx)  # for the next propagate()
+        self._pending.add(idx)  # for the next work-list run
         self._unknown.clear()  # an earlier Unknown might now be provable
         if len(prem.vars) == 1 and vs[0] not in self._solved:
             self._rule_d(idx, vs[0])
@@ -260,44 +302,78 @@ class PolySolver:
         self._substitute_pins()
 
     def add_solved(self, x: str, t: Expr, tag: str) -> Verdict:
-        """Check that ``x = t`` is implied; if so, replace x by t from now on.
+        """add_solved_all with the one equation ``x = t``."""
+        return self.add_solved_all([(x, t, tag)])[0]
 
-        x must be declared. The check is an ordinary query of x - t against
-        the current state. On Implied, x is replaced by t in the premises (as
-        the rules see them), in earlier solved equations and in all later
-        queries. On Unknown the equation is rejected, which costs
-        completeness only. If x is already solved (e.g. pinned by propagate),
-        the query compares its value with t, and an Implied verdict changes
-        nothing. If the check is Unknown and x has a set of three values,
-        rule C searches x's group once; if that pins anything, the work list
-        runs and x = t is checked again (C's pins stay either way). An
-        Implied verdict names the solved equations that rewrote x - t, so an
-        equation that agrees with a pin from C names the premises behind it.
-        Every verdict goes into ``solved_log``, with whether it agreed with a
-        value x already had.
+    def add_solved_all(self, eqs: Iterable[tuple[str, Expr, str]]) -> list[Verdict]:
+        """Check each ``x = t`` (given as ``(x, t, tag)``); replace x by t once implied.
+
+        Each x must be declared. A check is an ordinary query of x - t
+        against the current state, run by the work list after its premises
+        are done, lowest index first. On Implied, x is replaced by t in the
+        premises (as the rules see them), in earlier solved equations and in
+        all later queries, and D and O look at the premises that changed. If
+        x is already solved (e.g. pinned), the query compares its value with
+        t, and an Implied verdict changes nothing. If the check is Unknown
+        and x has a set of case_split_trigger values, rule C searches x's
+        group (any variables with finite sets, within the cap); if that
+        pins anything, x = t is checked again (C's pins stay either way). An
+        equation still Unknown waits, and is checked again when one of its
+        variables, or a premise that mentions one, is rewritten or has a
+        domain narrowed; in this call only. Rejected in the end costs
+        completeness only. An Implied verdict names the solved equations that
+        rewrote x - t, so an equation that agrees with a pin from C names the
+        premises behind it. Returns the last verdict of each, in order, and
+        logs them in ``solved_log`` with whether x already had that value.
         """
-        agreed = self.solved_agreed
-        verdict = self._add_solved(x, t, tag)
-        self.solved_log.append((tag, verdict, self.solved_agreed > agreed))
-        return verdict
+        batch = []
+        for x, t, tag in eqs:
+            (xv,) = self._declared_vars(x, "solved variable")
+            vs = self._declared_vars(t, "solved value")
+            batch.append(_Equation(xv, t, tag, frozenset((xv, *vs))))
+        self._eqs = batch
+        self._eq_ready = list(range(len(batch)))  # sorted, so already a heap
+        self._eq_queued = set(self._eq_ready)
+        try:
+            self._run_queue()
+        finally:
+            self._eqs, self._eq_ready, self._eq_queued = [], [], set()
+            self._waiting.clear()
+            self._waiting_on_var.clear()
+            self._waiting_on_premise.clear()
+        for e in batch:
+            if isinstance(e.verdict, Unknown):
+                self.solved_rejected += 1
+            self.solved_log.append((e.tag, e.verdict, e.agreed))
+        return [e.verdict for e in batch]
 
-    def _add_solved(self, x: str, t: Expr, tag: str) -> Verdict:
-        (xv,) = self._declared_vars(x, "solved variable")
-        self._declared_vars(t, "solved value")
-        verdict = self._check_solved(xv, t, tag)
+    def _check_equation(self, j: int) -> None:
+        """One check of equation j, for the work list: accept it, or let it wait."""
+        e = self._eqs[j]
+        if e.rejected:
+            self.solved_rechecks += 1
+        agreed = self.solved_agreed
+        verdict = self._check_solved(e.x, e.t, e.tag)
         if (
             isinstance(verdict, Unknown)
+            and not e.skip_c
             and self._use_case_split
-            and xv not in self._solved
-            and self._three_valued(xv)
-            and self._rule_c(xv)
+            and e.x not in self._solved
+            and self._starts_search(e.x)
+            and self._rule_c(e.x)
         ):
-            self._substitute_pins()
-            self._run_queue()
-            verdict = self._check_solved(xv, t, tag)  # a comparison, if x is pinned now
-        if isinstance(verdict, Unknown):
-            self.solved_rejected += 1
-        return verdict
+            # Check again once C's pins are substituted and their premises read.
+            e.skip_c = True
+            self._ready(j)
+            return
+        e.skip_c = False
+        e.verdict = verdict
+        if isinstance(verdict, Implied):
+            e.agreed = self.solved_agreed > agreed
+            self.solved_on_retry += e.rejected
+            return
+        e.rejected = True
+        self._wait(j)
 
     def _check_solved(self, xv: Var, t: Expr, tag: str) -> Verdict:
         """Rules N and S on x - t; if Implied and x is unsolved, replace x by t."""
@@ -342,7 +418,8 @@ class PolySolver:
         Earlier solved values that mention x get x replaced too, so every value
         stays free of solved variables. They are all computed before anything
         changes, so an expansion limit leaves no trace. The premises that
-        mention x read differently now, so propagate() looks at them again.
+        mention x read differently now, so the work list looks at them again,
+        and at the waiting equations that read them or x.
         """
         # Taken before x is replaced: afterwards _occurs_in no longer lists it.
         again = self._coi_premise_ids(xv)
@@ -366,6 +443,7 @@ class PolySolver:
         self._solved_version += 1  # premise keys and splits are now stale
         self._unknown.clear()  # an earlier Unknown might now be provable
         self._enqueue(again)
+        self._wake(again, (xv,))
 
     def _narrow_domain(
         self,
@@ -401,6 +479,8 @@ class PolySolver:
         self._unknown.clear()
         if hi <= 1 and (old is None or old.hi > 1):
             self._requeue_premises_of([v])  # newly in [0, 1]: a premise over v may be a group now
+        if self._waiting:  # rules S and C read domains
+            self._wake(self._coi_premise_ids(v), (v,))
         if lo == hi and v not in self._solved:
             self._new_pins.append(v)
         return True
@@ -426,17 +506,21 @@ class PolySolver:
         return self.propagate_pins[-1]
 
     def _run_queue(self) -> None:
-        """Run propagate()'s work list until it is empty.
+        """Run the work list until it is empty: premises first, then one equation.
 
         Every premise is looked at once, then again whenever something it
         depends on changes: one of its variables gets a domain within [0, 1],
-        joins a group, or is replaced by its value. Between runs, ranges and
-        solved equations queue the premises they change for the next one.
+        joins a group, or is replaced by its value. Between runs, new
+        premises, ranges and their pins queue the premises they change for
+        the next one.
         Domains only shrink and a variable is replaced at most once, so the
-        list runs empty, and then no premise can give anything new. A
-        premise is expanded only if its variables, as it reads now, could fit
-        a rule: one variable (D), or all of them within [0, 1] (O); _vars_now
-        says when they are read off the key instead.
+        premises run out, and then none can give anything new. A premise is
+        expanded only if its variables, as it reads now, could fit a rule:
+        one variable (D), or all of them within [0, 1] (O); _vars_now says
+        when they are read off the key instead.
+
+        Only then is the next equation of add_solved_all checked, so each
+        check sees what D and O made of every earlier one.
         """
         todo, self._pending = sorted(self._pending), set()
         self._queue, self._queued = deque(), set()
@@ -444,11 +528,18 @@ class PolySolver:
             # One-variable premises first: they hold the x^2 - x that O needs.
             self._enqueue(i for i in todo if len(self._premises[i].vars) == 1)
             self._enqueue(todo)
-            while self._queue:
-                i = self._queue.popleft()
-                self._queued.discard(i)
-                self._propagate_premise(i)
-                self._substitute_pins()
+            while True:
+                while self._queue:
+                    i = self._queue.popleft()
+                    self._queued.discard(i)
+                    self._propagate_premise(i)
+                    self._substitute_pins()
+                if not self._eq_ready:
+                    break
+                j = heapq.heappop(self._eq_ready)
+                self._eq_queued.discard(j)
+                self._check_equation(j)
+                self._substitute_pins()  # rule C's
         finally:
             self._queue = None
 
@@ -984,8 +1075,12 @@ class PolySolver:
 
     def _vars_from_syntax(self, i: int) -> set[Var]:
         """The variables premise i can mention under the solved equations."""
+        return self._vars_under_solved(self._premises[i].vars)
+
+    def _vars_under_solved(self, vs: Iterable[Var]) -> set[Var]:
+        """``vs``, with each solved variable replaced by the variables of its value."""
         out = set()
-        for v in self._premises[i].vars:
+        for v in vs:
             value = self._solved.get(v)
             if value is None:
                 out.add(v)
@@ -995,10 +1090,15 @@ class PolySolver:
 
     # ------------------------------------------------------------ rule C
 
-    def _three_valued(self, v: Var) -> bool:
-        """v's domain is a set of exactly three values: the only ones rule C splits on."""
+    def _starts_search(self, x: Var) -> bool:
+        """The policy: an equation about x starts a search if x has case_split_trigger values."""
+        d = self._domains.get(x)
+        return d is not None and d.values is not None and len(d.values) == self.case_split_trigger
+
+    def _finite(self, v: Var) -> bool:
+        """v's domain is a finite set of values: v can be in a group."""
         d = self._domains.get(v)
-        return d is not None and d.values is not None and len(d.values) == 3
+        return d is not None and d.values is not None
 
     def _rule_c(self, x: Var) -> bool:
         """Rule C: pin each variable of x's group that has one value in every solution.
@@ -1042,10 +1142,11 @@ class PolySolver:
         """Rule C's scan: (each variable's set of values, coupling premise ids) for x.
 
         A coupling premise mentions, under the solved equations, two or more
-        variables, each with a set of three values; x's group is what such
-        premises reach from x. C is sound for any subset of the premises;
-        the whole group matters for completeness only. None if there is no
-        coupling premise, or more than CASE_SPLIT_GROUP_CAP cases.
+        variables, each with a finite set of values (of any size: which x
+        starts a search is the policy's, not the group's); x's group is what
+        such premises reach from x. C is sound for any subset of the
+        premises; the whole group matters for completeness only. None if
+        there is no coupling premise, or more than CASE_SPLIT_GROUP_CAP cases.
         """
         dom = {x: sorted(self._domains[x].values)}
         cases = len(dom[x])
@@ -1059,10 +1160,10 @@ class PolySolver:
                 seen.add(i)
                 # The syntax first, so a flag that gates many data premises
                 # does not expand them all.
-                if not all(self._three_valued(v) for v in self._vars_now(i)):
+                if not all(self._finite(v) for v in self._vars_now(i)):
                     continue
                 vs = self._vars_from_key(i)
-                if len(vs) < 2 or not all(self._three_valued(v) for v in vs):
+                if len(vs) < 2 or not all(self._finite(v) for v in vs):
                     continue  # a domain premise, or one that cancelled down
                 coupling.append(i)
                 for w in vs - dom.keys():
@@ -1077,7 +1178,7 @@ class PolySolver:
     # ------------------------------------------------------------ work list
 
     def _enqueue(self, ids: Iterable[int]) -> None:
-        """Queue premises for propagate(); outside it, keep them for the next call."""
+        """Queue premises for the work list; outside a run, keep them for the next one."""
         if self._queue is None:
             self._pending.update(ids)
             return
@@ -1090,6 +1191,42 @@ class PolySolver:
         """Queue every premise that mentions one of ``vs`` (see _enqueue)."""
         for v in vs:
             self._enqueue(self._coi_premise_ids(v))
+
+    def _ready(self, j: int) -> None:
+        """Queue equation j for a check."""
+        if j not in self._eq_queued:
+            self._eq_queued.add(j)
+            heapq.heappush(self._eq_ready, j)
+
+    def _wait(self, j: int) -> None:
+        """Equation j was rejected: wait on its variables and the premises that mention them."""
+        e = self._eqs[j]
+        vs = frozenset(self._vars_under_solved(e.written))
+        ids = frozenset(i for v in vs for i in self._coi_premise_ids(v))
+        e.wait_vars, e.wait_premises = vs, ids
+        self._waiting.add(j)
+        for v in vs:
+            self._waiting_on_var[v].add(j)
+        for i in ids:
+            self._waiting_on_premise[i].add(j)
+
+    def _wake(self, ids: Iterable[int], vs: Iterable[Var]) -> None:
+        """Queue the waiting equations that read a premise in ``ids`` or a variable in ``vs``."""
+        if not self._waiting:
+            return
+        woken = set()
+        for i in ids:
+            woken.update(self._waiting_on_premise.get(i, ()))
+        for v in vs:
+            woken.update(self._waiting_on_var.get(v, ()))
+        for j in woken:
+            e = self._eqs[j]
+            self._waiting.discard(j)
+            for v in e.wait_vars:
+                self._waiting_on_var[v].discard(j)
+            for i in e.wait_premises:
+                self._waiting_on_premise[i].discard(j)
+            self._ready(j)
 
     # ------------------------------------------------------------ helpers
 

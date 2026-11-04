@@ -1,5 +1,6 @@
-"""Rule C in add_solved: an equation x = t that N and S cannot decide, with x
-three-valued, first pins each variable with one value in every fit of x's group."""
+"""Rule C in add_solved: an equation x = t that N and S cannot decide, with x's
+set of case_split_trigger values (3 by default), first pins each variable with
+one value in every fit of x's group (variables with any finite set)."""
 from functools import reduce
 
 import pytest
@@ -171,13 +172,38 @@ def test_many_fits_cost_less_than_all_of_them():
     [(boolean, 1, False), (quad, 1, False), (ternary, 1, True), (halves, HALF, True)],
     ids=["two values", "four values", "0, 1, 2", "0, 1/2, 1"],
 )
-def test_only_three_value_domains_are_split(domain, mid, split):
+def test_by_default_only_a_three_valued_x_starts_a_search(domain, mid, split):
     # a = b and a + b = 2 * mid: one combination fits, if rule C looks.
     s = solver(["a", "b"], {"d_a": domain("a"), "d_b": domain("b"), "eq": sub("a", "b"),
                             "sum": sub(add("a", "b"), mul(2, mid))})
     v = solve(s, "a", mid)
     assert s.case_splits == int(split) and isinstance(v, Implied) == split
     assert pins(s) == ({"a": mid, "b": mid} if split else {})
+
+
+@pytest.mark.parametrize("domain, trigger", [(boolean, 2), (quad, 4)],
+                         ids=["two values", "four values"])
+def test_the_trigger_is_a_policy(domain, trigger):
+    # The case above that the default skips, with the trigger set to a's size.
+    s = solver(["a", "b"], {"d_a": domain("a"), "d_b": domain("b"), "eq": sub("a", "b"),
+                            "sum": sub(add("a", "b"), 2)}, case_split_trigger=trigger)
+    assert solve(s, "a", 1).rule == "trivial" and s.case_splits == 1
+    assert pins(s) == {"a": 1, "b": 1}
+
+
+def test_the_group_takes_any_finite_set():
+    # a starts the search (three values); Boolean b and four-valued c join its
+    # group: a = b and a + b = 2 give a = b = 1, then a + c = 4 gives c = 3.
+    s = solver(["a", "b", "c"], {"t_a": ternary("a"), "d_b": boolean("b"), "d_c": quad("c"),
+                                 "eq": sub("a", "b"), "sum": sub(add("a", "b"), 2),
+                                 "ac": sub(add("a", "c"), 4)})
+    assert solve(s, "a", 1).rule == "trivial" and s.case_splits == 1
+    assert pins(s) == {"a": 1, "b": 1, "c": 3}
+
+
+def test_trigger_below_two_is_refused():
+    with pytest.raises(ValueError, match="case_split_trigger"):
+        PolySolver(VarTable(), declared=["a"], case_split_trigger=1)
 
 
 # ---------------------------------------------------------------- pins between equations

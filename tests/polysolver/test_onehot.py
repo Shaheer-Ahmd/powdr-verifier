@@ -368,6 +368,7 @@ def test_hint_swaps_a_group_member():
                  ("sel", sub(add("b", mul(2, "c")), 2))]
     s = solver(["a", "b", "c", "x"], premises)
     assert s.propagate_pins == [0]
+    # add_solved runs D and O on what the hint rewrote: no propagate() needed.
     assert isinstance(s.add_solved("x", "c", tag="h:x"), Implied)
-    assert s.propagate() == 3
     assert pins(s) == {"a": 0, "b": 0, "c": 1, "x": 1}
+    assert s.propagate() == 0

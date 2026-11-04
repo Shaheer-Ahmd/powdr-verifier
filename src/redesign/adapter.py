@@ -24,11 +24,13 @@ def reference_solver(
     pins what they decide, with ``constants`` from a premise x - c, with
     ``one_hot`` from booleanity, flag groups and selectors.
     ``hints`` are candidate solved equations x = t over reference columns,
-    tried in order. The solver checks each one and keeps only those that
-    follow from what it already knows (a hint equal to a pin is kept too); a
-    rejected hint costs completeness only. With ``case_split``, a hint about
-    a variable with three values that the check cannot decide first gets a
-    case split over the variable's group (rule C).
+    given to the solver in one call and tried in order. The solver keeps
+    only those that follow from what it knows (a hint equal to a pin is kept
+    too), runs D and O after each one it keeps, and tries a rejected hint
+    again when something it reads changes. A hint rejected in the end costs
+    completeness only. With ``case_split``, a hint about a variable with
+    three values that the check cannot decide gets a case split over the
+    variable's group (rule C).
     """
     s = PolySolver(
         table,
@@ -43,6 +45,6 @@ def reference_solver(
         for x, lo, hi in byte_ranges(ref):
             s.add_range(x, lo, hi, tag=f"{ref.label}:bytes:{x}")
     s.propagate()
-    for x, t in hints:
-        s.add_solved(x, t, tag=f"{HINT_TAG}{x}")
+    if hints:
+        s.add_solved_all([(x, t, f"{HINT_TAG}{x}") for x, t in hints])
     return s
