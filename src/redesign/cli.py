@@ -55,6 +55,11 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="skip rule C (a case split over finite sets, started by a hint on a three-valued variable)",
     )
+    c.add_argument(
+        "--no-trust-program",
+        action="store_true",
+        help="do not evaluate PcLookups against the block's own instructions",
+    )
     c.add_argument("--root", type=Path, help="dump root (default: powdr-dumps)")
     c.add_argument("--json", action="store_true", help="machine-readable output")
     c.add_argument("-v", "--verbose", action="store_true", help="list every obligation")
@@ -83,6 +88,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-case-split",
         action="store_true",
         help="skip rule C (a case split over finite sets, started by a hint on a three-valued variable)",
+    )
+    s.add_argument(
+        "--no-trust-program",
+        action="store_true",
+        help="do not evaluate PcLookups against the block's own instructions",
     )
     s.add_argument(
         "--pass",
@@ -258,6 +268,7 @@ def _sweep(args, directions) -> int:
                 use_constants=not args.no_constants,
                 use_one_hot=not args.no_one_hot,
                 use_case_split=not args.no_case_split,
+                trust_program=not args.no_trust_program,
                 passes=args.passes,
                 on_pair=record if db else None,
             )
@@ -346,6 +357,7 @@ def main(argv: list[str] | None = None) -> int:
             not args.no_constants,
             not args.no_one_hot,
             not args.no_case_split,
+            not args.no_trust_program,
         )
     except (ResolveError, FileNotFoundError, MissingDefinition) as exc:
         print(f"redesign: {type(exc).__name__}: {exc}", file=sys.stderr)

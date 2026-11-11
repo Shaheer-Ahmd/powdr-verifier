@@ -3,7 +3,7 @@
 from src.polysolver import BABYBEAR, Implied, PolySolver, VarTable
 from src.redesign import tables
 from src.redesign.check import check, check_step
-from src.redesign.circuit import Circuit
+from src.redesign.circuit import Circuit, load_program, program_of
 
 P = BABYBEAR
 LOW = "rd_aux_cols__base__timestamp_lt_aux__lower_decomp__0_3@122"
@@ -161,3 +161,40 @@ def test_opaque_lookup_only_column_falls_through_to_a_root():
     after = circuit("a", [["a", "*", ["a", "-", 1]]])
     (snd,) = check_step(before, after, {}, ("soundness",))
     assert snd.verified and snd.mapping.source["x"] == "lookup-only root"
+
+
+# ------------------------------------------------------------ the trusted program
+
+
+def test_program_rows_come_from_the_unopt_block():
+    program = load_program("keccak", "2099512")
+    assert list(program) == [2099512 + 4 * i for i in range(5)]
+    assert program[2099516] == (531, 4, 8, 476, 1, 2, 1, 0)
+    assert program_of({"machine": {}}) == {}  # a dump with no block
+
+
+def test_pc_lookup_is_decided_only_inside_the_block():
+    program = {100: (1, 2, 3), 104: (4, 5, 6)}
+    assert tables.is_row(2, [100, 1, 2, 3], program) is True
+    assert tables.is_row(2, [104, 1, 2, 3], program) is False  # another instruction
+    assert tables.is_row(2, [100, 1, 2], program) is False
+    assert tables.is_row(2, [108, 1, 2, 3], program) is None  # a pc the block lacks
+    assert tables.is_row(2, [100, 1, 2, 3]) is None  # no program: not evaluated
+    assert tables.is_row(2, [100, 1, 2, 3], {}) is None
+
+
+def test_pc_lookup_rungs():
+    program = {100: (1, 2, 3)}
+    pc_rows = [lookup(2, 100, 1, 2, 3), lookup(2, 100, 1, 2, 4), lookup(2, 104, 1, 2, 3)]
+    before, after = circuit("b", buses=pc_rows), circuit("a")
+    (snd,) = check_step(before, after, {}, ("soundness",), program=program)
+    assert [(o.rung, o.reason) for o in snd.obligations] == [
+        ("evaluated-program", ""),
+        ("undecided", "bus: constant args not a row"),
+        ("undecided", "bus: pc_lookup outside the block"),
+    ]
+    (snd,) = check_step(before, after, {}, ("soundness",))
+    assert {o.reason for o in snd.obligations} == {"bus: pc_lookup not trusted"}
+    # Congruence needs no table: a PcLookup the reference has is discharged either way.
+    (snd,) = check_step(before, before, {}, ("soundness",))
+    assert {o.rung for o in snd.obligations} == {"identical"}

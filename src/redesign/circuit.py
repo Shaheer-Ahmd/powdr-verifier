@@ -7,11 +7,12 @@ from pathlib import Path
 from typing import Any
 
 from src.lens.loader import load, machine_of
-from src.lens.resolve import group_dir, resolve, substitutions_path
+from src.lens.resolve import base_dump_path, group_dir, resolve, substitutions_path
 from src.paths import POWDR_DUMPS_DIR
 from src.polysolver import BABYBEAR, Expr, variables
 
 MEMORY_BUS = 1
+PC_STEP = 4  # pcs of consecutive instructions (OpenVM's DEFAULT_PC_STEP)
 # Lookups into fixed tables: PcLookup, VariableRangeChecker, BitwiseLookup,
 # TupleRangeChecker. Ids as in src/bus_interactions/__init__.py::OpenVMBusInteraction
 # (not imported: that module pulls in pysmt). Memory and the execution bridge
@@ -63,6 +64,30 @@ def load_substitutions(
     """The block's eliminated columns and what replaced them (empty if no file)."""
     path = substitutions_path(group_dir(group, root or POWDR_DUMPS_DIR), block)
     return {name: e for name, e in load(path)} if path else {}
+
+
+def load_program(
+    group: str, block: str, root: Path | None = None, p: int = BABYBEAR
+) -> dict[int, tuple[int, ...]]:
+    """The block's own instructions, by pc, from its unopt dump (empty if it has none).
+
+    The dump's ``block.blocks[]`` each give a start pc and the instructions
+    [opcode, a, ..., g] that follow it. This is powdr's reading of the program,
+    the same one it pins every PcLookup to, so evaluating a PcLookup against
+    it trusts "block = program" (the sweep reports that under its own rung).
+    """
+    path = base_dump_path(group_dir(group, root or POWDR_DUMPS_DIR), block)
+    return program_of(load(path), p) if path else {}
+
+
+def program_of(dump: dict, p: int = BABYBEAR) -> dict[int, tuple[int, ...]]:
+    """pc -> instruction (field elements) for every instruction of the dump's block."""
+    out: dict[int, tuple[int, ...]] = {}
+    block = dump.get("block") if isinstance(dump, dict) else None
+    for b in (block or {}).get("blocks", []):
+        for i, ins in enumerate(b["instructions"]):
+            out[b["start_pc"] + PC_STEP * i] = tuple(x % p for x in ins)
+    return out
 
 
 def substitute(e: Expr, mapping: dict[str, Expr]) -> Expr:

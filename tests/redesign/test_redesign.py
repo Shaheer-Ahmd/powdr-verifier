@@ -109,14 +109,15 @@ def test_opcode_flags_pinned_by_one_hot(one_hot, hints, undecided):
 
 @pytest.mark.parametrize(
     "case_split, hints, undecided",
-    [(True, (1661, 9), (8, 0)), (False, (797, 873), (8, 192))],
+    [(True, (1661, 9), (8, 0)), (False, (797, 873), (8, 96))],
     ids=["rule C", "no rule C"],
 )
 def test_load_store_flags_pinned_by_rule_c(case_split, hints, undecided):
     # solver pass: a load/store flag is 0, 1 or 2, and only all the flag
     # premises together say which (rule C). The first flag hint of each
     # instance pins the flags; the data hints then follow by rule N, and with
-    # them the lookups.
+    # them the lookups. Without rule C the 96 PcLookups still hold: their
+    # arguments are constants in After, and rows of the block's program.
     (cmp,) = check("keccak", "2099828", "002", "003", ("completeness",),
                    use_case_split=case_split)
     assert (cmp.hints_accepted, cmp.hints_rejected) == hints
@@ -130,7 +131,9 @@ def test_load_store_flags_two_fits_agree_on():
     # and (1, 1, 0, 0), both with is_load = 0. Rule C pins f0, f3 and is_load,
     # which agree, and not f1 or f2; powdr hints exactly those three.
     (cmp,) = check("keccak", "2099796", "002", "003", ("completeness",))
-    assert (cmp.counts("constraint")["undecided"], cmp.counts("bus")["undecided"]) == (6, 1)
+    # The one lookup rule C leaves is a PcLookup, a row of the block's program.
+    assert (cmp.counts("constraint")["undecided"], cmp.counts("bus")["undecided"]) == (6, 0)
+    assert cmp.counts("bus")["evaluated-program"] == 8  # one per instruction
     names = {h[0] for h in cmp.hints if h[1]}
     assert {"flags__0_3@136", "flags__3_3@139", "is_load_3@141"} <= names
 

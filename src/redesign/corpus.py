@@ -18,7 +18,7 @@ from src.lens.resolve import ResolveError, group_dir, index_block, list_blocks
 from src.paths import POWDR_DUMPS_DIR, VERIFIER_DIR
 
 from .check import DIRECTIONS, check_step
-from .circuit import Circuit, load_substitutions
+from .circuit import Circuit, load_program, load_substitutions
 from .mapping import MissingDefinition
 from .sweep import Report
 
@@ -37,6 +37,7 @@ def run_sweep(
     use_constants: bool = True,
     use_one_hot: bool = True,
     use_case_split: bool = True,
+    trust_program: bool = True,
     passes: Iterable[str] = (),
     on_pair: Callable[[list[dict], list[Report | None], Circuit, Circuit], None]
     | None = None,
@@ -63,6 +64,7 @@ def run_sweep(
     steps: list[dict] = []
     for block, entries in indexed.items():
         subs = load_substitutions(group, block, root)
+        program = load_program(group, block, root) if trust_program else None
         circuits: dict[int, Circuit] = {}  # loaded on first use
         records = []
         for i in range(len(entries) - 1):
@@ -92,6 +94,7 @@ def run_sweep(
                     use_constants,
                     use_one_hot,
                     use_case_split,
+                    program,
                 )
             except MissingDefinition as exc:
                 # Only completeness raises; still record soundness separately.
@@ -107,6 +110,7 @@ def run_sweep(
                         use_constants,
                         use_one_hot,
                         use_case_split,
+                        program,
                     )
                 pair = [_error(base, "completeness", str(exc))]
                 pair += [_record(base, r) for r in reports[1:]]
@@ -129,6 +133,7 @@ def run_sweep(
         "constants": use_constants,
         "one_hot": use_one_hot,
         "case_split": use_case_split,
+        "trust_program": trust_program,
         "seconds": round(time.monotonic() - start, 1),
         "created": datetime.now().astimezone().isoformat(timespec="seconds"),
         "verifier_commit": _commit(),

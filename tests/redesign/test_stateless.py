@@ -40,23 +40,25 @@ def test_noop_step_verified_with_lookups():
         assert r.verified and r.counts("bus")["identical"] > 0, r.direction
 
 
-def test_removed_constant_lookups_are_evaluated_except_pc_lookup():
+@pytest.mark.parametrize("trust_program", [False, True])
+def test_removed_constant_lookups_are_evaluated(trust_program):
     # remove_disconnected drops 14 lookups with constant args: 5 PcLookup,
     # 2 VariableRangeChecker, 7 BitwiseLookup (lens diff: "bus: -14"). The
-    # range and bitwise ones are table rows; PcLookup is not evaluated.
-    cmp, snd = check("keccak", "2099512", "005", "006")
+    # range and bitwise ones are table rows. A PcLookup is evaluated only
+    # against the block's own instructions, under its own rung, and not at
+    # all unless the program is trusted.
+    cmp, snd = check("keccak", "2099512", "005", "006", trust_program=trust_program)
     assert cmp.verified  # every After lookup is still in Before
+    assert snd.verified == trust_program
     before = load_step("keccak", "2099512", "005")
     outcome = collections.Counter(
         (before.stateless[int(o.name.split(":b")[1])]["id"], o.rung, o.reason)
         for o in bus_obligations(snd)
-        if o.rung in ("undecided", "evaluated")
+        if o.rung in ("undecided", "evaluated", "evaluated-program")
     )
-    assert outcome == {
-        (6, "evaluated", ""): 7,
-        (3, "evaluated", ""): 2,
-        (2, "undecided", "bus: pc_lookup not trusted"): 5,
-    }
+    pc = (2, "evaluated-program", "") if trust_program else (
+        2, "undecided", "bus: pc_lookup not trusted")
+    assert outcome == {(6, "evaluated", ""): 7, (3, "evaluated", ""): 2, pc: 5}
 
 
 def test_lookup_only_columns_get_witness_zero(monkeypatch):

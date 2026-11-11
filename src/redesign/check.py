@@ -7,7 +7,7 @@ from pathlib import Path
 from src.polysolver import Expr, VarTable, variables
 
 from .adapter import reference_solver
-from .circuit import Circuit, load_step, load_substitutions
+from .circuit import Circuit, load_program, load_step, load_substitutions
 from .mapping import completeness_mapping, soundness_mapping
 from .sweep import Report, sweep
 
@@ -39,8 +39,13 @@ def check_step(
     use_constants: bool = True,
     use_one_hot: bool = True,
     use_case_split: bool = True,
+    program: dict[int, tuple[int, ...]] | None = None,
 ) -> list[Report]:
-    """Completeness: Before is the reference. Soundness: After is."""
+    """Completeness: Before is the reference. Soundness: After is.
+
+    ``program``: the block's own instructions by pc, trusted as the PcLookup
+    table (see sweep's evaluated-program rung); None evaluates no PcLookup.
+    """
     table = VarTable()  # one per step, shared by both directions
     reports = []
     if "completeness" in directions:
@@ -51,7 +56,7 @@ def check_step(
             table, before, use_ranges, hints, use_constants, use_one_hot, use_case_split
         )
         m = completeness_mapping(before, after, subs)
-        reports.append(sweep("completeness", before, after, m, solver, hints))
+        reports.append(sweep("completeness", before, after, m, solver, hints, program))
     if "soundness" in directions:
         solver = reference_solver(
             table,
@@ -62,7 +67,7 @@ def check_step(
             case_split=use_case_split,
         )
         m = soundness_mapping(after, before, subs, solver) # <- Polysolver used to find missing witnesses
-        reports.append(sweep("soundness", after, before, m, solver))
+        reports.append(sweep("soundness", after, before, m, solver, program=program))
     return reports
 
 
@@ -78,6 +83,7 @@ def check(
     use_constants: bool = True,
     use_one_hot: bool = True,
     use_case_split: bool = True,
+    trust_program: bool = True,
 ) -> list[Report]:
     before = load_step(group, block, step_from, root)
     after = load_step(group, block, step_to, root)
@@ -92,4 +98,5 @@ def check(
         use_constants,
         use_one_hot,
         use_case_split,
+        load_program(group, block, root) if trust_program else None,
     )

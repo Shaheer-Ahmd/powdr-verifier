@@ -68,6 +68,8 @@ BUS_ROWS = [
     ("identical", "via mapping", "same, once mapped columns are substituted"),
     ("evaluated", "direct", "constant arguments that form a table row"),
     ("evaluated", "via mapping", "same, once mapped columns are substituted"),
+    ("evaluated-program", "direct", "a PcLookup that is the block's own instruction at that pc"),
+    ("evaluated-program", "via mapping", "same, once mapped columns are substituted"),
     ("congruence", "direct", "PolySolver proves mult and args equal to a reference lookup's"),
     ("congruence", "via mapping", "same, with mapped columns substituted"),
 ]
@@ -75,6 +77,7 @@ BUS_RUNG_NOTE = {
     "trivial": "rung 1, canon mult = 0",
     "identical": "rung 2, lens _bus_exact_key",
     "evaluated": "rung 3, table row (not PcLookup)",
+    "evaluated-program": "rung 3, PcLookup row; trusts the dump's block as the program",
     "congruence": "rung 4, PolySolver implies_equal",
 }
 

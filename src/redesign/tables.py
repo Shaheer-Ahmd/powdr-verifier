@@ -5,14 +5,17 @@ used for lookups whose arguments are all constants (after the mapping and the
 solved equations), so a row check decides them outright. The semantics follow
 the SMT encoders in src/bus_interactions/.
 
-PcLookup (bus 2) is deliberately not evaluated: its table is the program, and
-the redesign does not trust it (yet). Unknown buses are not evaluated either.
+PcLookup (bus 2) has no fixed table: its table is the program. It is
+evaluated only against a ``program`` the caller passes (the block's own
+instructions from the unopt dump, circuit.load_program), which is a trust
+decision the sweep reports under its own rung. Unknown buses are not evaluated.
 """
 
 from __future__ import annotations
 
 from src.polysolver import Defs, PolySolver
 
+PC_LOOKUP = 2  # [pc, opcode, a, ..., g]: the program's instruction at pc
 VARIABLE_RANGE_CHECKER = 3  # [x, bits]: x < 2^bits
 BITWISE_LOOKUP = 6  # [x, y, z, op]: op 0 range-checks x, y; op 1 has z = x xor y
 # Widest width the range checker is instantiated for
@@ -20,8 +23,18 @@ BITWISE_LOOKUP = 6  # [x, y, z, op]: op 0 range-checks x, y; op 1 has z = x xor 
 MAX_BITS = 25
 
 
-def is_row(bus: int, args: list[int]) -> bool | None:
-    """True or False if ``args`` (integers in [0, p)) is or is not a row; None if not decided."""
+def is_row(
+    bus: int, args: list[int], program: dict[int, tuple[int, ...]] | None = None
+) -> bool | None:
+    """True or False if ``args`` (integers in [0, p)) is or is not a row; None if not decided.
+
+    ``program`` maps a pc to its instruction. A PcLookup is decided only for
+    the pcs it covers: the rest of the program is not known here.
+    """
+    if bus == PC_LOOKUP:
+        if not program or not args or args[0] not in program:
+            return None
+        return tuple(args[1:]) == program[args[0]]
     if bus == VARIABLE_RANGE_CHECKER and len(args) == 2:
         x, bits = args
         if bits > MAX_BITS:

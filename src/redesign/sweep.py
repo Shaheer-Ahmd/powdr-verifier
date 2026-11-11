@@ -16,8 +16,11 @@ table", where the table is an uninterpreted predicate. Its obligation I[w]:
                args (lens's _bus_exact_key), so it already asserts this fact
   evaluated  - every argument is a constant (under the mapping and the solved
                equations) and the tuple is a table row (tables.is_row); the
-               only rung that uses what a table contains. PcLookup is not
-               evaluated (not trusted)
+               only rung that uses what a table contains
+  evaluated-program - the same for a PcLookup, whose table is the program:
+               the row is the block's own instruction at that pc (the unopt
+               dump's block). It trusts "block = program", so it is a rung
+               of its own, with a switch (trust_program)
   congruence - a reference interaction J on the same bus with PolySolver
                proving mult_I = mult_J and arg_I,k = arg_J,k for every k: by
                congruence, J's fact gives I's. J is proposed by an index on
@@ -51,9 +54,7 @@ from src.polysolver import (
 from .adapter import HINT_TAG
 from .circuit import Circuit, interaction_columns, substitute, substitute_interaction
 from .mapping import Mapping
-from .tables import constant, is_row, normal_key
-
-PC_LOOKUP = 2  # its table is the program: never evaluated (not trusted)
+from .tables import PC_LOOKUP, constant, is_row, normal_key
 
 # Rungs that prove an obligation; anything else is "undecided".
 DISCHARGED = (
@@ -62,6 +63,7 @@ DISCHARGED = (
     "normalize",
     "nowrap-split",
     "evaluated",
+    "evaluated-program",
     "congruence",
 )
 
@@ -114,7 +116,9 @@ REASONS = {
     "bus: constant args not a row": "every argument is a constant and the tuple is"
     " not a table row: a real failure if the multiplicity can be nonzero",
     "bus: pc_lookup not trusted": "a program-counter lookup with constant"
-    " arguments; its table is the program, which the redesign does not evaluate",
+    " arguments; its table is the program, and trust_program is off",
+    "bus: pc_lookup outside the block": "a program-counter lookup with constant"
+    " arguments at a pc the block's own instructions do not cover",
 }
 
 
@@ -175,10 +179,13 @@ def sweep(
     mapping: Mapping,
     solver: PolySolver,
     hints: list[tuple[str, Expr]] = (),
+    program: dict[int, tuple[int, ...]] | None = None,
 ) -> Report:
     """Check every candidate constraint against the reference under ``mapping``.
 
     ``hints`` are the ones the solver was given, for their forms in the report.
+    ``program`` is the block's own instructions by pc, if the caller trusts
+    them as the PcLookup table; None leaves constant PcLookups undecided.
     """
     report = Report(direction, mapping)
     defs = solver.make_defs(mapping.defs)
@@ -296,7 +303,9 @@ def sweep(
             # Rung 2: the reference asserts this very fact (same bus, mult, args).
             ob = Obligation(name, "identical", via_mapping=mapped, kind="bus")
         else:
-            ob = _by_tables_or_congruence(name, bi, defs, solver, ref, ref_index, mapped)
+            ob = _by_tables_or_congruence(
+                name, bi, defs, solver, ref, ref_index, mapped, program
+            )
             if ob is None:
                 same_mult = (bw["id"], mult) in ref_bus_mults
                 reason = (
@@ -382,6 +391,7 @@ def _by_tables_or_congruence(
     ref: Circuit,
     ref_index: dict,
     mapped: bool,
+    program: dict[int, tuple[int, ...]] | None = None,
 ) -> Obligation | None:
     """The evaluated and congruence rungs for one lookup; None if neither applies."""
     key = normal_key(solver, bi, defs)
@@ -390,13 +400,15 @@ def _by_tables_or_congruence(
     bus, _, args = key
     values = [constant(a) for a in args]
     ground = all(v is not None for v in values)
-    if ground and bus != PC_LOOKUP:
+    if ground and (bus != PC_LOOKUP or program is not None):
         # Rung 3: constant arguments. Decide by the table, whatever the mult is:
-        # a row makes "mult != 0 => row" true outright. PcLookup is never
-        # evaluated (its table is the program); congruence below needs no table.
-        row = is_row(bus, values)
+        # a row makes "mult != 0 => row" true outright. A PcLookup's table is
+        # the program; it is evaluated only against the block's own
+        # instructions, and only if the caller trusts them (program is given).
+        row = is_row(bus, values, program)
         if row:
-            return Obligation(name, "evaluated", f"bus {bus} row {values}",
+            rung = "evaluated-program" if bus == PC_LOOKUP else "evaluated"
+            return Obligation(name, rung, f"bus {bus} row {values}",
                               via_mapping=mapped, kind="bus")
         if row is False:
             return Obligation(
@@ -406,8 +418,9 @@ def _by_tables_or_congruence(
     # Rung 4: congruence with a reference lookup J proposed by the index.
     ob = _congruence(name, bi, defs, solver, ref, ref_index.get(key), mapped)
     if ob is None and ground and bus == PC_LOOKUP:
+        reason = "outside the block" if program is not None else "not trusted"
         return Obligation(
-            name, "undecided", "pc_lookup", reason="bus: pc_lookup not trusted",
+            name, "undecided", "pc_lookup", reason=f"bus: pc_lookup {reason}",
             via_mapping=mapped, kind="bus",
         )
     return ob
