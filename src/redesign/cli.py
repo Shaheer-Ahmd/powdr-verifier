@@ -65,6 +65,12 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="skip rule S' (pin the summands of a ranged sum that cannot wrap to 0)",
     )
+    c.add_argument(
+        "--lookup-ranges",
+        action="store_true",
+        help="also take ranges from the reference's own range and bitwise lookups"
+        " (constant nonzero multiplicity, bare columns)",
+    )
     c.add_argument("--root", type=Path, help="dump root (default: powdr-dumps)")
     c.add_argument("--json", action="store_true", help="machine-readable output")
     c.add_argument("-v", "--verbose", action="store_true", help="list every obligation")
@@ -103,6 +109,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-nowrap-pins",
         action="store_true",
         help="skip rule S' (pin the summands of a ranged sum that cannot wrap to 0)",
+    )
+    s.add_argument(
+        "--lookup-ranges",
+        action="store_true",
+        help="also take ranges from the reference's own range and bitwise lookups"
+        " (constant nonzero multiplicity, bare columns)",
     )
     s.add_argument(
         "--pass",
@@ -280,6 +292,7 @@ def _sweep(args, directions) -> int:
                 use_case_split=not args.no_case_split,
                 trust_program=not args.no_trust_program,
                 use_nowrap_pins=not args.no_nowrap_pins,
+                use_lookup_ranges=args.lookup_ranges,
                 passes=args.passes,
                 on_pair=record if db else None,
             )
@@ -370,6 +383,7 @@ def main(argv: list[str] | None = None) -> int:
             not args.no_case_split,
             not args.no_trust_program,
             not args.no_nowrap_pins,
+            args.lookup_ranges,
         )
     except (ResolveError, FileNotFoundError, MissingDefinition) as exc:
         print(f"redesign: {type(exc).__name__}: {exc}", file=sys.stderr)

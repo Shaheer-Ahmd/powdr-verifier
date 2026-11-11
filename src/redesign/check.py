@@ -41,6 +41,7 @@ def check_step(
     use_case_split: bool = True,
     program: dict[int, tuple[int, ...]] | None = None,
     use_nowrap_pins: bool = True,
+    use_lookup_ranges: bool = False,
 ) -> list[Report]:
     """Completeness: Before is the reference. Soundness: After is.
 
@@ -56,6 +57,7 @@ def check_step(
         solver = reference_solver(
             table, before, use_ranges, hints, use_constants, use_one_hot, use_case_split,
             use_nowrap_pins,
+            use_lookup_ranges,
         )
         m = completeness_mapping(before, after, subs)
         reports.append(sweep("completeness", before, after, m, solver, hints, program))
@@ -68,6 +70,7 @@ def check_step(
             one_hot=use_one_hot,
             case_split=use_case_split,
             nowrap_pins=use_nowrap_pins,
+            use_lookup_ranges=use_lookup_ranges,
         )
         m = soundness_mapping(after, before, subs, solver) # <- Polysolver used to find missing witnesses
         reports.append(sweep("soundness", after, before, m, solver, program=program))
@@ -88,6 +91,7 @@ def check(
     use_case_split: bool = True,
     trust_program: bool = True,
     use_nowrap_pins: bool = True,
+    use_lookup_ranges: bool = False,
 ) -> list[Report]:
     before = load_step(group, block, step_from, root)
     after = load_step(group, block, step_to, root)
@@ -104,4 +108,5 @@ def check(
         use_case_split,
         load_program(group, block, root) if trust_program else None,
         use_nowrap_pins,
+        use_lookup_ranges,
     )

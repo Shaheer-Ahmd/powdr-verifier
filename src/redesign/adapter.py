@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from src.polysolver import Expr, PolySolver, VarTable
 
-from .circuit import Circuit, byte_ranges
+from .circuit import Circuit, byte_ranges, lookup_ranges
 
 HINT_TAG = "hint:"  # tag prefix of powdr's substitutions, in verdicts and solved_log
 
@@ -18,6 +18,7 @@ def reference_solver(
     one_hot: bool = True,
     case_split: bool = True,
     nowrap_pins: bool = True,
+    use_lookup_ranges: bool = False,
 ) -> PolySolver:
     """Premises and ranges from the reference side only (the polarity rule).
 
@@ -33,6 +34,9 @@ def reference_solver(
     three values that the check cannot decide gets a case split over the
     variable's group (rule C). With ``nowrap_pins``, a premise that is a sum
     of ranged variables that cannot wrap pins each of them to 0 (rule S').
+    ``use_lookup_ranges`` also takes ranges from the reference's own range
+    and bitwise lookups with a constant nonzero multiplicity (off by default:
+    whether lookups may be premises is an open decision).
     """
     s = PolySolver(
         table,
@@ -47,6 +51,9 @@ def reference_solver(
     if use_ranges:
         for x, lo, hi in byte_ranges(ref):
             s.add_range(x, lo, hi, tag=f"{ref.label}:bytes:{x}")
+    if use_lookup_ranges:
+        for x, lo, hi in lookup_ranges(ref):
+            s.add_range(x, lo, hi, tag=f"{ref.label}:lookup:{x}")
     s.propagate()
     if hints:
         s.add_solved_all([(x, t, f"{HINT_TAG}{x}") for x, t in hints])

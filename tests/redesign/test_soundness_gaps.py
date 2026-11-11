@@ -3,7 +3,7 @@
 from src.polysolver import BABYBEAR, Implied, PolySolver, VarTable
 from src.redesign import tables
 from src.redesign.check import check, check_step
-from src.redesign.circuit import Circuit, load_program, program_of
+from src.redesign.circuit import Circuit, load_program, lookup_ranges, program_of
 
 P = BABYBEAR
 LOW = "rd_aux_cols__base__timestamp_lt_aux__lower_decomp__0_3@122"
@@ -198,3 +198,29 @@ def test_pc_lookup_rungs():
     # Congruence needs no table: a PcLookup the reference has is discharged either way.
     (snd,) = check_step(before, before, {}, ("soundness",))
     assert {o.rung for o in snd.obligations} == {"identical"}
+
+
+# ------------------------------------------------------------ squared is-zero
+
+
+def test_squared_is_zero_completeness_needs_lookup_ranges():
+    # f * sum (a_i - b_i)^2 - cmp: in the fork for sum = 0, rule S' needs a
+    # range for every limb. The a_i are memory sends; their only range is the
+    # bitwise lookup [a_i, a_i, 0, 1], which is a premise only on request.
+    for block in ("2103472", "2100224"):
+        (cmp,) = check("keccak", block, "047", "048", ("completeness",))
+        assert [o.reason for o in cmp.obligations if o.rung == "undecided"] == [
+            "quotient case not proved"
+        ]
+        (cmp,) = check("keccak", block, "047", "048", ("completeness",),
+                       use_lookup_ranges=True)
+        assert cmp.verified and cmp.counts("constraint")["quotient-split"] == 1
+
+
+def test_lookup_ranges_come_from_ungated_lookups_of_bare_columns():
+    c = circuit("c", buses=[
+        lookup(3, "x", 17), lookup(3, "x", 12), lookup(3, ["y", "+", 1], 8),
+        lookup(3, "g", 8, mult="sel"), lookup(3, "z", 8, mult=0), lookup(3, "w", "bits"),
+        lookup(6, "u", "v", 0, 1), lookup(6, "s", "s", 0, 7), lookup(2, "pc", 1),
+    ])
+    assert sorted(lookup_ranges(c)) == [("u", 0, 255), ("v", 0, 255), ("x", 0, 4095)]

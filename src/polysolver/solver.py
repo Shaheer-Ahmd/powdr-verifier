@@ -40,10 +40,11 @@ Rules that add to the store, each a local implication:
   over those sets, so x = v holds if every solution has x = v
   (enumeration.fixed_values). Leaving premises out of Q loses completeness
   only.
-- S' (no-wrap pins): a premise that reads c1*a1 + ... + cn*an, with no
-  constant term and every a_i ranged, whose weighted sum cannot reach p
-  (_no_wrap, as in rule S). The integer sum is then 0, and each term is
-  non-negative, so every a_i is 0.
+- S' (no-wrap pins): a premise over ranged variables that reads as a sum
+  of non-negative terms, c_i * a_i and c_j * L_j^2 with L_j affine, whose
+  integer value cannot reach p. The integer sum is then 0, so every term is:
+  a_i = 0 and L_j = 0. A one-variable L_j is a pin; one over several
+  variables is an equation x = t, which goes into Sol.
 - Collapse: a domain with one value v gives x = v, which goes into Sol.
 - Checked equation: x = t (add_solved) goes into Sol only once rule N or S
   proves x - t.
@@ -79,8 +80,9 @@ The contract that keeps each rule local:
   naming every premise and domain they read (_premise_tags, _domain_tags).
   O's group index only says where its selector part should look, and that
   part re-reads the group.
-- _substitute is called only for pins (_substitute_pins) and for
-  checked equations (_check_solved).
+- _substitute is called only for pins (_substitute_pins), for checked
+  equations (_check_solved), and for the equations S' reads off a square
+  (_rule_s_pins).
 
 Triggers, which are scheduling only:
 - add_premise: D on a premise that mentions one variable as written.
@@ -292,7 +294,8 @@ class PolySolver:
         self.case_split_capped = 0  # groups or searches over the caps
         self.case_split_unsat = 0  # searches with no fit: the premises contradict each other
         self.case_split_seconds = 0.0  # its own time
-        self.nowrap_pins = 0  # variables rule S' narrowed to 0
+        self.nowrap_pins = 0  # variables rule S' pinned
+        self.nowrap_equations = 0  # equations x = t rule S' read off a square
         self.forks = 0  # child solvers made for rule Q
         # (tag, last verdict, agreed with x's value) per equation, in call order
         self.solved_log: list[tuple[str, Verdict, bool]] = []
@@ -1202,23 +1205,162 @@ class PolySolver:
             self._rule_s_pins(i)
 
     def _rule_s_pins(self, i: int) -> None:
-        """Rule S' on premise i, whose variables are all ranged: pin every summand to 0.
+        """Rule S' on premise i, whose variables are all ranged: every term of a no-wrap sum is 0.
 
-        Premise: i reads c1*a1 + ... + cn*an with no constant term. Side
-        condition: _no_wrap, as in rule S: for some unit multiple the
-        weighted sum of the upper bounds stays below p. Then the integer sum
-        is 0, and each term is non-negative (ranges start at 0 or above), so
-        every a_i is 0. Tags: the premise and the summands' domains.
+        Premise: i reads  sum_i c_i * a_i  +  sum_j c_j * L_j^2  with no
+        other term, each L_j an affine form w.x + t over its own variables
+        (_nonneg_terms). Side condition (_no_wrap_terms): for some unit
+        multiple, with every c as its representative in [1, p) and every w
+        and t as a signed integer, the largest value the integer sum can
+        take over the ranges stays below p. Each term is a non-negative
+        integer (ranges start at 0 or above; a square), their sum is 0 mod p
+        and below p, so it is 0 and every term is 0: a_i = 0 and L_j = 0.
+        Conclusions: a_i = 0 and a one-variable L_j narrow a domain; an L_j
+        over several variables is an equation x = t, substituted like a
+        checked one. Tags: the premise and the domains of all its variables.
         """
-        lin = self._linear(self._premise_key(i))
-        if lin is None or lin[1] or len(lin[0]) < 2:
+        k = self._premise_key(i)
+        if not k or any(P.degree(m) > 2 for m, _ in k):
             return
-        w = lin[0]
-        if self._no_wrap({((v, 1),): c for v, c in w.items()}):
+        terms = self._nonneg_terms(dict(k))
+        if terms is None:
             return
-        tags = self._premise_tags(i) + self._domain_tags(w)
-        for v in w:
+        linear, squares = terms
+        if len(linear) + len(squares) < 2 and not squares:
+            return  # one variable: rule D's
+        if not self._no_wrap_terms(linear, squares):
+            return
+        vs = set(linear).union(*(w for _, w, _ in squares)) if squares else set(linear)
+        tags = self._premise_tags(i) + self._domain_tags(sorted(vs))
+        for v in linear:
             self.nowrap_pins += self._narrow_domain(v, 0, 0, tags)
+        for _, w, t in squares:
+            # L = sum w_v * v + t = 0: solve it for one variable.
+            x = max(w, key=self.table.name)
+            inv = pow(w[x], self.p - 2, self.p)
+            if len(w) == 1:
+                value = -t * inv % self.p
+                self.nowrap_pins += self._narrow_domain(x, value, value, tags, frozenset((value,)))
+                continue
+            rhs = P.const(-t * inv, self.p)
+            for v, c in w.items():
+                if v != x:
+                    rhs[((v, 1),)] = -c * inv % self.p
+            try:
+                self._substitute(x, rhs, tuple(dict.fromkeys(tags)))
+            except P.ExpansionLimit:
+                continue
+            self.nowrap_equations += 1
+
+    def _nonneg_terms(self, a: P.Poly) -> tuple[dict, list] | None:
+        """Read ``a`` as  sum c_i * a_i + sum c_j * (w_j . x + t_j)^2, or None.
+
+        Returns ({a_i: c_i}, [(pivot coefficients {x: c_j for that pivot}, w_j, t_j)]):
+        field values only; which integers represent them is _no_wrap_terms's
+        business. The variables joined by a product x*y form one square, and
+        a variable in no degree-2 term is a linear term. Each square is
+        checked coefficient by coefficient, so the reading is exact:
+        c * (w.x + t)^2 = c * sum w_x w_y x y + 2 c t * sum w_x x + c t^2,
+        with w normalised to 1 at a pivot. The constant term must be the sum
+        of the c_j * t_j^2. A square is returned once per pivot (c and w
+        differ by the pivot's weight), for the bound to pick from.
+        """
+        p = self.p
+        diag: dict[Var, int] = {}
+        cross: dict[frozenset, int] = {}
+        lin: dict[Var, int] = {}
+        c0 = 0
+        for m, c in a.items():
+            if m == ():
+                c0 = c
+            elif len(m) == 1 and m[0][1] == 1:
+                lin[m[0][0]] = c
+            elif len(m) == 1 and m[0][1] == 2:
+                diag[m[0][0]] = c
+            elif len(m) == 2:
+                cross[frozenset((m[0][0], m[1][0]))] = c
+            else:
+                return None
+        # Components of the variables that occur in degree-2 terms.
+        comp = {v: v for v in diag}
+        for pair in cross:
+            if not pair <= diag.keys():
+                return None  # x*y without x^2 and y^2: no square
+
+        def find(v: Var) -> Var:
+            while comp[v] != v:
+                comp[v] = comp[comp[v]]
+                v = comp[v]
+            return v
+
+        for pair in cross:
+            x, y = pair
+            comp[find(x)] = find(y)
+        groups: dict[Var, list[Var]] = defaultdict(list)
+        for v in diag:
+            groups[find(v)].append(v)
+        half = pow(2, p - 2, p)
+        squares, const = [], 0
+        for members in groups.values():
+            readings = {}
+            for u in members:  # u as the pivot: w_u = 1, c = the coefficient of u^2
+                c = diag[u]
+                c_inv = pow(c, p - 2, p)
+                w = {u: 1}
+                for v in members:
+                    if v != u:
+                        w[v] = cross.get(frozenset((u, v)), 0) * half * c_inv % p
+                t = lin.get(u, 0) * half * c_inv % p
+                ok = all(diag[v] == c * w[v] * w[v] % p for v in members)
+                ok = ok and all(lin.get(v, 0) == 2 * c * t * w[v] % p for v in members)
+                ok = ok and all(
+                    cross.get(frozenset((x, y)), 0) == 2 * c * w[x] * w[y] % p
+                    for j, x in enumerate(members)
+                    for y in members[j + 1 :]
+                )
+                if not ok:
+                    return None
+                readings[u] = (c, w, t)
+            c, w, t = readings[members[0]]
+            const = (const + c * t * t) % p
+            squares.append((readings, w, t))
+        if const != c0:
+            return None
+        linear = {v: c for v, c in lin.items() if v not in diag}
+        return linear, squares
+
+    def _no_wrap_terms(self, linear: dict, squares: list) -> bool:
+        """True if, for some unit multiple, the integer sum of the terms stays below p.
+
+        Linear terms: (k * c_i mod p) * hi_i. A square, for the best pivot:
+        (k * c mod p) * M^2, where M is the largest |w.x + t| over the ranges
+        with w and t as signed integers in (-p/2, p/2). These integers are
+        congruent to the field values, so the integer sum is congruent to k
+        times the premise, which is 0.
+        """
+        p = self.p
+
+        def signed(c: int) -> int:
+            return c - p if c > p // 2 else c
+
+        sized = []  # per square: [(c, M^2)] per pivot
+        for readings, _, _ in squares:
+            options = []
+            for c, w, t in readings.values():
+                lo = hi = signed(t)
+                for v, wv in w.items():
+                    d, wv = self._domains[v], signed(wv)
+                    lo += wv * (d.lo if wv > 0 else d.hi)
+                    hi += wv * (d.hi if wv > 0 else d.lo)
+                options.append((c, max(abs(lo), abs(hi)) ** 2))
+            sized.append(options)
+        coeffs = list(linear.values()) + [c for options in sized for c, _ in options]
+        for k in {1, p - 1} | {pow(c, p - 2, p) for c in coeffs}:
+            bound = sum(c * k % p * self._domains[v].hi for v, c in linear.items())
+            bound += sum(min(c * k % p * m2 for c, m2 in options) for options in sized)
+            if bound < p:
+                return True
+        return False
 
     def _rule_o(self, i: int) -> None:
         """Rule O on premise i, whose variables are all in [0, 1]: group part, then selector part.

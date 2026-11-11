@@ -275,3 +275,133 @@ def test_split_linear():
     assert poly.split_linear(a, x) == ({((y, 1),): 2, (): 4}, {((y, 2),): 3, (): 5})
     assert poly.split_linear(a, y) is None
     assert poly.split_linear({}, x) == ({}, {})
+
+
+# ------------------------------------------------------------ rule S': squares
+
+
+def square(e):
+    return mul(e, e)
+
+
+def ranged(names, premise, hi=255, **kw):
+    s = PolySolver(VarTable(), declared=names, **kw)
+    s.add_premise(premise, "p")
+    for x in names:
+        s.add_range(x, 0, hi, f"r:{x}")
+    s.propagate()
+    return s
+
+
+def test_sum_of_squares_gives_equations():
+    # (a0 - b0)^2 + (a1 - b1)^2 = 0 over bytes: a0 = b0 and a1 = b1.
+    s = ranged(["a0", "b0", "a1", "b1"], add(square(sub("a0", "b0")), square(sub("a1", "b1"))))
+    assert s.nowrap_equations == 2
+    v = s.implies(sub("a0", "b0"))
+    assert isinstance(v, Implied) and {"p", "r:a0", "r:b0"} <= set(v.solved)
+    assert isinstance(s.implies(sub("a1", "b1")), Implied)
+    assert isinstance(s.implies(sub("a0", "b1")), Unknown)
+
+
+def test_affine_squares_and_linear_terms_mix():
+    # keccak 2100224: (a0 - 32)^2 + (a1 - 99)^2 + (a2 - 32)^2 + a3 = 0.
+    d = add(square(sub("a0", 32)), square(sub("a1", 99)), square(sub("a2", 32)), "a3")
+    s = ranged(A, d)
+    assert s.nowrap_pins == 4
+    for name, value in zip(A, (32, 99, 32, 0)):
+        assert isinstance(s.implies(sub(name, value)), Implied)
+
+
+def test_square_with_weights():
+    # The unit multiple is tried among the inverses of the coefficients, as in
+    # rule S: 1/4 of this premise's key reads (2a - b)^2 + 2c.
+    s = ranged(["a", "b", "c"], add(mul(3, square(sub(mul(2, "a"), "b"))), mul(6, "c")))
+    assert isinstance(s.implies(sub(mul(2, "a"), "b")), Implied)
+    assert isinstance(s.implies("c"), Implied)
+    assert isinstance(s.implies("a"), Unknown)
+
+
+@pytest.mark.parametrize(
+    "premise",
+    [
+        sub(square(sub("a", "b")), square("c")),  # a difference of squares
+        add(square(sub("a", "b")), 1),  # a constant that no square accounts for
+        add(mul("a", "b"), "c"),  # a product, not a square
+        add(square(sub("a", "b")), mul("a", "c")),  # a stray cross term
+        add(square(sub("a", "b")), "a"),  # a linear term on a squared variable
+        add(mul("a", mul("a", "a")), "b"),  # degree 3
+    ],
+)
+def test_squares_decline(premise):
+    s = ranged(["a", "b", "c"], premise)
+    assert s.nowrap_pins == 0 and s.nowrap_equations == 0
+
+
+def test_squares_need_the_bound():
+    # Over 16-bit ranges four squares can reach 4 * 65535^2 > p.
+    names = ["a0", "b0", "a1", "b1"]
+    s = ranged(names, add(square(sub("a0", "b0")), square(sub("a1", "b1"))), hi=2**16 - 1)
+    assert s.nowrap_equations == 0
+    s = ranged(names, add(square(sub("a0", "b0")), square(sub("a1", "b1"))), hi=2**14)
+    assert s.nowrap_equations == 2
+
+
+def test_squares_need_every_range():
+    s = PolySolver(VarTable(), declared=["a", "b"])
+    s.add_premise(square(sub("a", "b")), "p")  # sound even so, but D and S' both pass
+    s.add_range("a", 0, 255, "a")
+    s.propagate()
+    assert s.nowrap_equations == 0
+
+
+def test_squares_are_sound_on_small_field():
+    # Brute force over F_101: whatever S' concludes holds in every model.
+    p = 101
+    shapes = [
+        lambda c, w, t: add(mul(c, square(add("a", mul(w, "b"), t))), "c"),
+        lambda c, w, t: add(square(sub("a", mul(w, "b"))), mul(c, square(sub("c", t)))),
+        lambda c, w, t: add(mul(c, square(sub("a", "b"))), mul(w, "c"), t),
+    ]
+    fired = 0
+    for shape in shapes:
+        for c in (1, 2, 50, 100):
+            for w in (1, 3, 100):
+                for t in (0, 1, 99):
+                    for hi in (1, 3, 6, 40):
+                        e = shape(c, w, t)
+                        s = PolySolver(VarTable(), declared=["a", "b", "c"], p=p, max_terms=64)
+                        s.add_premise(e, "p")
+                        for x in "abc":
+                            s.add_range(x, 0, hi, x)
+                        s.propagate()
+                        if not (s.nowrap_pins or s.nowrap_equations):
+                            continue
+                        fired += 1
+                        queries = ["a", "b", "c", sub("a", "b"), sub("a", mul(w, "b")),
+                                   add("a", mul(w, "b"), t), sub("c", t)]
+                        proved = [q for q in queries if isinstance(s.implies(q), Implied)]
+                        for a in range(hi + 1):
+                            for b in range(hi + 1):
+                                for cc in range(hi + 1):
+                                    env = {"a": a, "b": b, "c": cc}
+                                    val = lambda q: poly.expand(
+                                        q, lambda n: poly.const(env[n], p), p).get((), 0)
+                                    if val(e) == 0:
+                                        assert all(val(q) == 0 for q in proved), (c, w, t, hi)
+    assert fired > 20
+
+
+def test_squared_is_zero_gadget_through_rule_q():
+    b = ["b0", "b1", "b2", "b3"]
+    diffs = [sub(x, y) for x, y in zip(A, b)]
+    s = PolySolver(VarTable(), declared=[*A, *b, *INV, "cmp"])
+    s.add_premise(mul("cmp", sub("cmp", 1)), "bool")
+    s.add_premise(sub(add(*(mul(d, i) for d, i in zip(diffs, INV))), "cmp"), "inv")
+    for x in [*A, *b]:
+        s.add_range(x, 0, 255, f"byte:{x}")
+    s.propagate()
+    d = add(*(square(x) for x in diffs))
+    defs = s.make_defs({"f": Quotient("cmp", d)})
+    v = s.implies(sub(mul("f", d), "cmp"), defs)
+    assert isinstance(v, Implied) and v.rule == "quotient-split"
+    assert s.nowrap_equations == 0  # the equations stay in the fork
