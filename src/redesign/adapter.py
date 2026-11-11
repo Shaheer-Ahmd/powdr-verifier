@@ -18,7 +18,7 @@ def reference_solver(
     one_hot: bool = True,
     case_split: bool = True,
     nowrap_pins: bool = True,
-    use_lookup_ranges: bool = False,
+    use_lookup_ranges: bool = True,
 ) -> PolySolver:
     """Premises and ranges from the reference side only (the polarity rule).
 
@@ -35,8 +35,8 @@ def reference_solver(
     variable's group (rule C). With ``nowrap_pins``, a premise that is a sum
     of ranged variables that cannot wrap pins each of them to 0 (rule S').
     ``use_lookup_ranges`` also takes ranges from the reference's own range
-    and bitwise lookups with a constant nonzero multiplicity (off by default:
-    whether lookups may be premises is an open decision).
+    and bitwise lookups with a constant nonzero multiplicity: such a lookup
+    is part of the reference circuit, so it holds for every witness.
     """
     s = PolySolver(
         table,

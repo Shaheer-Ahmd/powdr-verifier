@@ -41,7 +41,7 @@ def check_step(
     use_case_split: bool = True,
     program: dict[int, tuple[int, ...]] | None = None,
     use_nowrap_pins: bool = True,
-    use_lookup_ranges: bool = False,
+    use_lookup_ranges: bool = True,
 ) -> list[Report]:
     """Completeness: Before is the reference. Soundness: After is.
 
@@ -91,7 +91,7 @@ def check(
     use_case_split: bool = True,
     trust_program: bool = True,
     use_nowrap_pins: bool = True,
-    use_lookup_ranges: bool = False,
+    use_lookup_ranges: bool = True,
 ) -> list[Report]:
     before = load_step(group, block, step_from, root)
     after = load_step(group, block, step_to, root)

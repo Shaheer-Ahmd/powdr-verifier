@@ -204,17 +204,17 @@ def test_pc_lookup_rungs():
 
 
 def test_squared_is_zero_completeness_needs_lookup_ranges():
-    # f * sum (a_i - b_i)^2 - cmp: in the fork for sum = 0, rule S' needs a
-    # range for every limb. The a_i are memory sends; their only range is the
-    # bitwise lookup [a_i, a_i, 0, 1], which is a premise only on request.
+    # f * sum (a_i - b_i)^2 - cmp: in the fork for sum = 0, rule S needs a
+    # range for every limb. The a_i are memory sends; their only range is
+    # their own bitwise lookup [a_i, a_i, 0, 1].
     for block in ("2103472", "2100224"):
         (cmp,) = check("keccak", block, "047", "048", ("completeness",))
+        assert cmp.verified and cmp.counts("constraint")["quotient-split"] == 1
+        (cmp,) = check("keccak", block, "047", "048", ("completeness",),
+                       use_lookup_ranges=False)
         assert [o.reason for o in cmp.obligations if o.rung == "undecided"] == [
             "quotient case not proved"
         ]
-        (cmp,) = check("keccak", block, "047", "048", ("completeness",),
-                       use_lookup_ranges=True)
-        assert cmp.verified and cmp.counts("constraint")["quotient-split"] == 1
 
 
 def test_lookup_ranges_come_from_ungated_lookups_of_bare_columns():

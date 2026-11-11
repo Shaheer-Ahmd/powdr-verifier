@@ -140,7 +140,7 @@ def lookup_ranges(c: Circuit, p: int = BABYBEAR) -> list[tuple[str, int, int]]:
     witness, so its tuple is a row: [x, bits] on the range checker gives
     x < 2^bits, and [x, y, z, op] with op 0 or 1 on the bitwise table gives
     x, y < 256. Gated lookups and expression arguments are skipped, which
-    costs completeness only. Off by default (see reference_solver).
+    costs completeness only.
     """
     out: dict[str, tuple[str, int, int]] = {}
 

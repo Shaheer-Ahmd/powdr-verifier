@@ -39,7 +39,7 @@ def run_sweep(
     use_case_split: bool = True,
     trust_program: bool = True,
     use_nowrap_pins: bool = True,
-    use_lookup_ranges: bool = False,
+    use_lookup_ranges: bool = True,
     passes: Iterable[str] = (),
     on_pair: Callable[[list[dict], list[Report | None], Circuit, Circuit], None]
     | None = None,

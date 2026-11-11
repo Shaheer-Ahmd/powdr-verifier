@@ -213,7 +213,7 @@ def test_drop_and_interrupted_runs(tmp_path):
         # "args [": brackets in the data are shown, not read as rich markup.
         ({"f": Filters(pass_="solver")}, ["Undecided obligations by reason", "args [", "hints"]),
         ({"f": Filters(reason="linear")}, ["undecided obligations in", "Obligations (first"]),
-        ({"f": Filters(pair="013->014")}, ["Undecided obligations by reason", "pair 013->014"]),
+        ({"f": Filters(pair="002->003")}, ["Undecided obligations by reason", "pair 002->003"]),
         ({"hints": True}, ["Rejected hints by the form of t", "by form: x := c"]),
         ({"vs": "off"}, ["Totals on the shared steps", "Discharged now", "switch one_hot: off -> on"]),
     ],
