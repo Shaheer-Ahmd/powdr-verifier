@@ -40,6 +40,10 @@ Rules that add to the store, each a local implication:
   over those sets, so x = v holds if every solution has x = v
   (enumeration.fixed_values). Leaving premises out of Q loses completeness
   only.
+- S' (no-wrap pins): a premise that reads c1*a1 + ... + cn*an, with no
+  constant term and every a_i ranged, whose weighted sum cannot reach p
+  (_no_wrap, as in rule S). The integer sum is then 0, and each term is
+  non-negative, so every a_i is 0.
 - Collapse: a domain with one value v gives x = v, which goes into Sol.
 - Checked equation: x = t (add_solved) goes into Sol only once rule N or S
   proves x - t.
@@ -52,6 +56,23 @@ Rules that answer a query, q rewritten under Sol and Defs, cheapest first:
   nonzero factor.
 - S (no-wrap split): a premise G * (c1*a1 + ... + cn*an) with ranged a_i
   whose weighted sum cannot reach p implies G * a_j = 0 for every j.
+- L (sum), the reverse of S, with no side condition: q is written
+  G * (t_1 + ... + t_n), and N or S proves G * t_j for every j. Then q, their
+  sum, is 0.
+- Q (quotient split): q mentions one f := Quotient(n, d), which is n / d if
+  d != 0 and 0 otherwise, and is linear in it: q = q1 * f + q0. Let
+  r = q1 * n + q0 * d. In a model with d != 0, f * d = n, so d * q = r; r
+  Implied gives d * q = 0, and q = 0 as F_p has no zero divisors. In a model
+  with d = 0, f = 0, so q = q0; q0 Implied in the fork for d = 0 gives q = 0.
+  Every model is in one of the two cases.
+
+The fork for an assumption a = 0 (_assuming) is a child solver holding a
+slice of this one's store (premises near the query, the solved equations
+they mention, the domains of their variables) plus the premise a. Every
+copied fact holds in every model of P and R (I), so every model of P and R
+with a = 0 is a model of the fork's inputs, and a fork verdict holds there.
+Any slice is sound; a smaller one loses completeness only. Fork verdicts
+serve one query and never enter this solver's caches.
 
 The contract that keeps each rule local:
 - D, O and C change the store only through _narrow_domain, with tags
@@ -66,9 +87,9 @@ Triggers, which are scheduling only:
 - The work list (_run_queue), run by propagate() and add_solved_all. It
   holds premises and equations, and empties the premises before each
   equation check:
-  - premises: D and O on every premise whose reading changed: added,
-    rewritten by a substitution, or with a variable newly in [0, 1] or in
-    a new group.
+  - premises: D, O and S' on every premise whose reading changed: added,
+    rewritten by a substitution, or with a variable newly ranged, newly in
+    [0, 1] or in a new group.
   - equations: checked by N and S, lowest index first. If x - t is Unknown
     and x is unsolved with a set of case_split_trigger values (a policy:
     the caller's, 3 by default), C searches x's group;
@@ -95,9 +116,9 @@ from dataclasses import dataclass, field, replace
 from typing import NamedTuple
 
 from . import poly as P
-from .defs import NO_DEFS, Defs, InvalidDefs, Opaque
+from .defs import NO_DEFS, Defs, InvalidDefs, Opaque, Quotient
 from .enumeration import GaveUp, NoSolution, fixed_values
-from .expr import Expr, product_factors, variables
+from .expr import Expr, product_factors, sum_terms, variables
 from .table import Var, VarTable
 
 BABYBEAR = 2013265921
@@ -105,6 +126,10 @@ BABYBEAR = 2013265921
 # more values. keccak's largest group has 243 cases (five variables).
 CASE_SPLIT_GROUP_CAP = 4096
 CASE_SPLIT_NODE_CAP = 100_000
+# Rule Q's fork takes the premises within this many hops of the query's
+# variables, and declines over the cap. Any slice is sound.
+FORK_HOPS = 1
+FORK_PREMISE_CAP = 200
 
 
 class UndefinedVariable(LookupError):
@@ -113,7 +138,7 @@ class UndefinedVariable(LookupError):
 
 @dataclass(frozen=True)
 class Implied:
-    rule: str  # "trivial" | "normalize" | "nowrap-split"
+    rule: str  # "trivial" | "normalize" | "nowrap-split" | "sum" | "quotient-split"
     premises: tuple[str, ...] = ()  # tags of the premises used
     ranges: tuple[str, ...] = ()  # variables whose ranges were used
     defs: tuple[str, ...] = ()  # defined variables that occur in q
@@ -127,7 +152,8 @@ class Implied:
 class Unknown:
     note: str  # why each rule declined, for triage
     # Machine-readable reason: "opaque", "expansion-limit", "nonzero-constant",
-    # "no-match", or a near miss of rule S: "nowrap-missing-range", "nowrap-bound".
+    # "no-match", a near miss of rule S: "nowrap-missing-range", "nowrap-bound",
+    # or "quotient": rule Q applied and one of its two cases was not proved.
     kind: str = "no-match"
 
 
@@ -196,6 +222,7 @@ class PolySolver:
         one_hot: bool = True,
         case_split: bool = True,
         case_split_trigger: int = 3,
+        nowrap_pins: bool = True,
     ):
         # Rule O's group part needs n < p for a sum of n variables. A key has
         # at most max_terms terms, so this makes it hold.
@@ -210,6 +237,7 @@ class PolySolver:
         # several values and rule O (one_hot), add_solved's rule C (case_split).
         self._use_constants, self._use_one_hot = constants, one_hot
         self._use_case_split = case_split
+        self._use_nowrap_pins = nowrap_pins  # rule S'
         # Rule C's policy: which equations start a search (x has a set of
         # this many values). The search itself takes any finite sets.
         self.case_split_trigger = case_split_trigger
@@ -264,6 +292,8 @@ class PolySolver:
         self.case_split_capped = 0  # groups or searches over the caps
         self.case_split_unsat = 0  # searches with no fit: the premises contradict each other
         self.case_split_seconds = 0.0  # its own time
+        self.nowrap_pins = 0  # variables rule S' narrowed to 0
+        self.forks = 0  # child solvers made for rule Q
         # (tag, last verdict, agreed with x's value) per equation, in call order
         self.solved_log: list[tuple[str, Verdict, bool]] = []
 
@@ -479,6 +509,8 @@ class PolySolver:
         self._unknown.clear()
         if hi <= 1 and (old is None or old.hi > 1):
             self._requeue_premises_of([v])  # newly in [0, 1]: a premise over v may be a group now
+        elif old is None and self._use_nowrap_pins:
+            self._requeue_premises_of([v])  # newly ranged: a sum over v may not wrap now
         if self._waiting:  # rules S and C read domains
             self._wake(self._coi_premise_ids(v), (v,))
         if lo == hi and v not in self._solved:
@@ -562,28 +594,35 @@ class PolySolver:
         """Number of solved variables: accepted equations and pins."""
         return len(self._solved)
 
-    def make_defs(self, mapping: dict[str, Expr | Opaque]) -> Defs:
-        """Validate definitions (D1 fresh, D2 flat, D3 polynomial or opaque)."""
-        polys, opaque = {}, set()
-        for name, rhs in mapping.items():
-            v = self._var(name)
-            if v in self.declared:
-                raise InvalidDefs(f"D1: {name} is declared, it cannot be defined")
-            if isinstance(rhs, Opaque):
-                opaque.add(v)
-                continue
+    def make_defs(self, mapping: dict[str, Expr | Opaque | Quotient]) -> Defs:
+        """Validate definitions (D1 fresh, D2 flat, D3 polynomial, quotient or opaque)."""
+        polys, opaque, quotients = {}, set(), {}
+
+        def as_written(name: str, rhs: Expr) -> P.Poly | None:
             for n in variables(rhs):  # raises UnsupportedExpr outside the grammar
                 if self._var(n) not in self.declared:  # also rules out chains
                     raise InvalidDefs(f"D2: {name} := ... mentions undeclared {n}")
             # Stored as written: implies applies the solved equations on use,
             # so the Defs stay valid when more equations are solved later.
             try:
-                polys[v] = P.expand(rhs, self._as_written, self.p, self.max_terms)
+                return P.expand(rhs, self._as_written, self.p, self.max_terms)
             except P.ExpansionLimit:
-                polys[v] = None  # queries through v report the limit
-        return Defs(polys, frozenset(opaque), id(self.table))
+                return None  # queries through the variable report the limit
 
-    def extend_defs(self, defs: Defs, name: str, rhs: Expr | Opaque) -> Defs:
+        for name, rhs in mapping.items():
+            v = self._var(name)
+            if v in self.declared:
+                raise InvalidDefs(f"D1: {name} is declared, it cannot be defined")
+            if isinstance(rhs, Opaque):
+                opaque.add(v)
+            elif isinstance(rhs, Quotient):
+                n, d = as_written(name, rhs.n), as_written(name, rhs.d)
+                quotients[v] = None if n is None or d is None else (n, d)
+            else:
+                polys[v] = as_written(name, rhs)
+        return Defs(polys, frozenset(opaque), id(self.table), quotients)
+
+    def extend_defs(self, defs: Defs, name: str, rhs: Expr | Opaque | Quotient) -> Defs:
         """``defs`` with ``name := rhs`` added (or replaced), validated like make_defs.
 
         Only the new right-hand side is expanded, so a caller trying several
@@ -597,7 +636,9 @@ class PolySolver:
         v = self._var(name)
         polys = {x: t for x, t in defs.polys.items() if x != v}
         polys.update(one.polys)
-        return Defs(polys, (defs.opaque - {v}) | one.opaque, defs.owner)
+        quotients = {x: t for x, t in defs.quotients.items() if x != v}
+        quotients.update(one.quotients)
+        return Defs(polys, (defs.opaque - {v}) | one.opaque, defs.owner, quotients)
 
     # ------------------------------------------------------------ query
 
@@ -606,18 +647,21 @@ class PolySolver:
         if defs is not NO_DEFS and defs.owner != id(self.table):
             raise ValueError("defs were made by a solver with another table")
         names = variables(q)
-        # Sort q's non-declared variables into defined (used) and opaque ones;
-        # anything else is a caller error.
-        used, opaque = [], []
+        # Sort q's non-declared variables into defined (used), quotient and
+        # opaque ones; anything else is a caller error.
+        used, opaque, quotients = [], [], []
         for n in sorted(names):
             v = self._var(n)
             if v in self.declared:
                 continue
             if not defs.defines(v):
                 raise UndefinedVariable(f"{n} is neither declared nor defined")
-            (opaque if v in defs.opaque else used).append(n)
+            kind = opaque if v in defs.opaque else quotients if v in defs.quotients else used
+            kind.append(n)
         if opaque:
             return Unknown(f"opaque: {', '.join(opaque)}", "opaque")
+        if quotients:
+            return self._rule_q(q, defs, quotients, used, names)
 
         try:
             k = P.zkey(P.expand(q, self._expander(defs), self.p, self.max_terms), self.p)
@@ -628,6 +672,12 @@ class PolySolver:
         verdict = self._implied.get(k) or self._unknown.get(k)
         if verdict is None:
             verdict = self._decide(k)
+            if isinstance(verdict, Unknown):
+                # Rule L reads q as written. Its verdict is about q's zeros, so
+                # it serves every query with this key.
+                by_sum = self._rule_l(q, defs)
+                if isinstance(by_sum, Implied):
+                    verdict = by_sum
             (self._implied if isinstance(verdict, Implied) else self._unknown)[k] = (
                 verdict
             )
@@ -704,11 +754,16 @@ class PolySolver:
         """
         return [self._premises[i].expr for i in self._by_var.get(self._var(name), [])]
 
-    def _expander(self, defs: Defs):
-        """Expansion lookup: Defs (reduced on use), then the solved equations."""
+    def _expander(self, defs: Defs, free: frozenset = frozenset()):
+        """Expansion lookup: Defs (reduced on use), then the solved equations.
+
+        A Var in ``free`` stays a plain variable (rule Q's quotient).
+        """
 
         def lookup(n: str) -> P.Poly:
             v = self._var(n)
+            if v in free:
+                return P.var_poly(v)
             if v in defs.polys:
                 if defs.polys[v] is None:
                     raise P.ExpansionLimit
@@ -727,6 +782,14 @@ class PolySolver:
             elif defs.polys.get(v):
                 out |= P.variables_of(defs.polys[v])
         return out
+
+    def _decide_cached(self, k: P.Key) -> Verdict:
+        """_decide through the verdict caches (for the parts of rules L and Q)."""
+        verdict = self._implied.get(k) or self._unknown.get(k)
+        if verdict is None:
+            verdict = self._decide(k)
+            (self._implied if isinstance(verdict, Implied) else self._unknown)[k] = verdict
+        return verdict
 
     def _decide(self, k: P.Key) -> Verdict:
         """Try the rules in order, cheapest first; the first Implied wins."""
@@ -931,15 +994,231 @@ class PolySolver:
             return "nowrap-bound", f"sum of c_i * hi_i is {bound} >= p"
         return None
 
-    # ------------------------------------------------------------ rules D and O
+    # ------------------------------------------------------------ rule L
+
+    def _rule_l(self, q: Expr, defs: Defs) -> Verdict:
+        """Rule L: q is written G * (t_1 + ... + t_n), and every G * t_j is implied.
+
+        The reverse of rule S: there one premise G * sum gives each G * a_j
+        (needing ranges); here the G * t_j, each proved by N or S, give
+        G * sum. No side condition: q = sum of the G * t_j, and each is 0 in
+        every model. Read off q's top-level factors as written; G is the
+        product of the other factors, under the Defs and the solved equations.
+        """
+        factors = product_factors(q)
+        if len(factors) < 2:
+            return Unknown("L: not a product")
+        lookup = self._expander(defs)
+        try:
+            polys = [P.expand(f, lookup, self.p, self.max_terms) for f in factors]
+            for fi, f in enumerate(factors):
+                terms = sum_terms(f)
+                if len(terms) < 2:
+                    continue
+                g = P.const(1, self.p)
+                for j, other in enumerate(polys):
+                    if j != fi:
+                        g = P.mul(g, other, self.p, self.max_terms)
+                parts = []
+                for sign, t in terms:
+                    part = P.mul(g, P.expand(t, lookup, self.p, self.max_terms), self.p, self.max_terms)
+                    v = self._decide_cached(P.zkey(part, self.p))
+                    if not isinstance(v, Implied):
+                        break
+                    parts.append(v)
+                else:
+                    return self._merged("sum", parts)
+        except P.ExpansionLimit:
+            return Unknown("L: expansion limit", "expansion-limit")
+        return Unknown("L: no factor is a sum of implied terms")
+
+    @staticmethod
+    def _merged(rule: str, parts: Iterable[Implied], premises: Iterable[str] = ()) -> Implied:
+        """One verdict resting on everything ``parts`` rest on (and ``premises``)."""
+        parts = list(parts)
+        return Implied(
+            rule,
+            tuple(sorted({t for v in parts for t in v.premises} | set(premises))),
+            tuple(sorted({t for v in parts for t in v.ranges})),
+            solved=tuple(sorted({t for v in parts for t in v.solved})),
+        )
+
+    # ------------------------------------------------------------ rule Q
+
+    def _rule_q(
+        self, q: Expr, defs: Defs, quotients: list[str], used: list[str], names: set[str]
+    ) -> Verdict:
+        """Rule Q: q is q1 * f + q0 for one f := Quotient(n, d); split on d.
+
+        With r = q1 * n + q0 * d (all under the solved equations):
+        - d != 0: f * d = n, so d * q = r. r Implied (rules N and S, on this
+          solver) gives d * q = 0, hence q = 0: no zero divisors.
+        - d = 0: f = 0, so q = q0. q0 Implied in the fork for d = 0
+          (_assuming) gives q = 0 there.
+        Every model is in one case. If d reads as a constant, only one case
+        has models and only it is checked. Declines on several quotients, or
+        q not linear in f. Nothing is cached: the verdict depends on f's
+        definition, not only on q's key.
+        """
+        if len(quotients) > 1:
+            return Unknown(f"Q: several quotients: {', '.join(quotients)}", "opaque")
+        (fname,) = quotients
+        f = self._var(fname)
+        if defs.quotients[f] is None:
+            return Unknown("expansion limit", "expansion-limit")
+        try:
+            qp = P.expand(q, self._expander(defs, frozenset((f,))), self.p, self.max_terms)
+            split = P.split_linear(qp, f)
+            if split is None:
+                return Unknown(f"Q: not linear in {fname}", "opaque")
+            q1, q0 = split
+            n, d = (self._apply_solved(x) for x in defs.quotients[f])
+            r = P.add(
+                P.mul(q1, n, self.p, self.max_terms),
+                P.mul(q0, d, self.p, self.max_terms),
+                self.p,
+            )
+        except P.ExpansionLimit:
+            return Unknown("expansion limit", "expansion-limit")
+        parts, assumed = [], []
+        if d:  # some model may have d != 0
+            v = self._decide_cached(P.zkey(r, self.p))
+            if not isinstance(v, Implied):
+                return Unknown(f"Q: case {fname}'s denominator != 0: {v.note}", "quotient")
+            parts.append(v)
+        if not d:  # d = 0 in every model: q = q0 here, no assumption needed
+            v = self._decide_cached(P.zkey(q0, self.p))
+        elif P.is_constant(P.zkey(d, self.p)):  # a nonzero constant: no model has d = 0
+            v = None
+        else:
+            tag = f"assume {fname}'s denominator = 0"
+            fork = self._assuming(d, P.variables_of(q0) | P.variables_of(d), tag)
+            if fork is None:
+                return Unknown(f"Q: case {fname}'s denominator = 0: fork over the cap", "quotient")
+            try:
+                q0_fork = fork._apply_solved(q0)
+            except P.ExpansionLimit:
+                return Unknown("expansion limit", "expansion-limit")
+            v = fork._decide(P.zkey(q0_fork, self.p))
+            if isinstance(v, Implied):
+                # Also the fork's pins that rewrote q0.
+                v = fork._with_solved_tags(v, P.variables_of(q0))
+            assumed.append(tag)
+        if v is not None:
+            if not isinstance(v, Implied):
+                return Unknown(f"Q: case {fname}'s denominator = 0: {v.note}", "quotient")
+            parts.append(v)
+        verdict = self._merged("quotient-split", parts, assumed)
+        mine = self._solved_tags(self._q_vars(names, defs) | P.variables_of(n) | P.variables_of(d))
+        # n and d were read under the solved equations too.
+        written = set().union(*(P.variables_of(x) for x in defs.quotients[f]))
+        mine = set(mine) | set(self._solved_tags(written))
+        return replace(
+            verdict,
+            defs=tuple(sorted([*used, fname])),
+            solved=tuple(sorted(set(verdict.solved) | mine)),
+        )
+
+    def _assuming(self, a: P.Poly, seeds: set[Var], tag: str) -> PolySolver | None:
+        """The fork for the assumption ``a = 0``: a child solver, or None over the cap.
+
+        It gets, on the same table: the premises within FORK_HOPS of
+        ``seeds`` (as written, with their tags), the solved equations those
+        premises mention, the domains of the variables involved, and the
+        premise ``a`` under ``tag``; then its work list runs. Every copied
+        fact holds in every model of this solver's P and R (invariant I), so
+        every such model with a = 0 is a model of the fork's inputs: what
+        the fork proves holds in all of them. Leaving facts out is sound.
+        A contradiction in the fork means no model has a = 0; nothing is
+        made of that.
+        """
+        ids: set[int] = set()
+        frontier, seen = set(seeds), set()
+        for _ in range(FORK_HOPS):
+            new = {i for v in frontier - seen for i in self._coi_premise_ids(v)} - ids
+            seen |= frontier
+            ids |= new
+            if len(ids) > FORK_PREMISE_CAP:
+                return None
+            frontier = set()
+            for i in new:
+                frontier |= self._vars_under_solved(self._premises[i].vars)
+        self.forks += 1
+        child = PolySolver(
+            self.table,
+            (),
+            self.p,
+            self.max_terms,
+            self._use_constants,
+            self._use_one_hot,
+            self._use_case_split,
+            self.case_split_trigger,
+            self._use_nowrap_pins,
+        )
+        child.declared = self.declared
+        involved = set(seeds)
+        for i in ids:
+            for v in self._premises[i].vars:
+                value = self._solved.get(v)
+                if value is None:
+                    involved.add(v)
+                elif v not in child._solved:
+                    child._solved[v] = value
+                    child._solved_tag[v] = self._solved_tag[v]
+                    for u in P.variables_of(value):
+                        child._occurs_in[u].add(v)
+                        involved.add(u)
+        for v in involved:
+            if v in self._domains:
+                child._domains[v] = self._domains[v]
+        for i in sorted(ids):
+            child.add_premise(self._premises[i].expr, self._premises[i].tag)
+        child.add_premise(self._poly_expr(a), tag)
+        child.propagate()
+        return child
+
+    def _poly_expr(self, a: P.Poly) -> Expr:
+        """A polynomial written back as an expression over names."""
+        out: Expr = 0
+        for m, c in sorted(a.items()):
+            term: Expr = c
+            for v, e in m:
+                for _ in range(e):
+                    term = [term, "*", self.table.name(v)]
+            out = term if out == 0 and not isinstance(out, list) else [out, "+", term]
+        return out
+
+    # ------------------------------------------------------------ rules D, O and S'
 
     def _propagate_premise(self, i: int) -> None:
-        """Read premise i under the solved equations, and apply rule D or rule O."""
+        """Read premise i under the solved equations, and apply rule D, or O and S'."""
         vs = self._vars_now(i)
         if len(vs) == 1:
             self._rule_d(i, *vs)
-        elif vs and self._use_one_hot and all(self._in_01(v) for v in vs):
+            return
+        if vs and self._use_one_hot and all(self._in_01(v) for v in vs):
             self._rule_o(i)
+        if vs and self._use_nowrap_pins and all(v in self._domains for v in vs):
+            self._rule_s_pins(i)
+
+    def _rule_s_pins(self, i: int) -> None:
+        """Rule S' on premise i, whose variables are all ranged: pin every summand to 0.
+
+        Premise: i reads c1*a1 + ... + cn*an with no constant term. Side
+        condition: _no_wrap, as in rule S: for some unit multiple the
+        weighted sum of the upper bounds stays below p. Then the integer sum
+        is 0, and each term is non-negative (ranges start at 0 or above), so
+        every a_i is 0. Tags: the premise and the summands' domains.
+        """
+        lin = self._linear(self._premise_key(i))
+        if lin is None or lin[1] or len(lin[0]) < 2:
+            return
+        w = lin[0]
+        if self._no_wrap({((v, 1),): c for v, c in w.items()}):
+            return
+        tags = self._premise_tags(i) + self._domain_tags(w)
+        for v in w:
+            self.nowrap_pins += self._narrow_domain(v, 0, 0, tags)
 
     def _rule_o(self, i: int) -> None:
         """Rule O on premise i, whose variables are all in [0, 1]: group part, then selector part.

@@ -5,7 +5,8 @@ reference side's constraints and byte ranges. The rungs, cheapest first:
 
   trivial    - c[w] is identically zero (canonical key is empty)
   identical  - c[w] has the same canonical key as a reference constraint
-  normalize / nowrap-split - PolySolver proves it
+  normalize / nowrap-split / sum / quotient-split - PolySolver proves it
+               (rules N, S, L, Q)
   undecided  - nothing applied; left for the SMT rungs (not built yet)
 
 A stateless bus interaction (a lookup) is the fact "mult != 0 => args in
@@ -45,6 +46,7 @@ from src.polysolver import (
     Implied,
     Opaque,
     PolySolver,
+    Quotient,
     UndefinedVariable,
     VarTable,
     poly,
@@ -62,6 +64,8 @@ DISCHARGED = (
     "identical",
     "normalize",
     "nowrap-split",
+    "sum",
+    "quotient-split",
     "evaluated",
     "evaluated-program",
     "congruence",
@@ -93,6 +97,8 @@ REASONS = {
     "unmapped column": "mentions a column the mapping could not define",
     "mapping gap": "mentions a column that is neither shared nor defined",
     "opaque QuotientOrZero": "needs the meaning of a QuotientOrZero column",
+    "quotient case not proved": "rule Q split on a QuotientOrZero column's"
+    " denominator, and one of the two cases does not follow",
     "opaque IfEqZero": "needs the meaning of an IfEqZero column",
     "opaque other": "needs the meaning of a non-polynomial derived column",
     "opaque extra definition": "a second, non-polynomial definition of a column",
@@ -142,6 +148,8 @@ class Report:
     case_split_capped: int = 0  # groups or searches it gave up on (over a cap)
     case_split_unsat: int = 0  # searches with no fit: the premises contradict each other
     case_split_ms: int = 0  # its own time
+    nowrap_pins: int = 0  # variables rule S' pinned to 0 (in the main solver)
+    forks: int = 0  # child solvers rule Q made
     # powdr's hints, in the order tried: (column, accepted, agreed with x's
     # value, rule or reject kind, note, form of t: hint_form).
     hints: list[tuple[str, bool, bool, str, str, str | None]] = field(default_factory=list)
@@ -190,10 +198,12 @@ def sweep(
     report = Report(direction, mapping)
     defs = solver.make_defs(mapping.defs)
     # Polynomial definitions can be written into c to get c[w] for the
-    # canonical rungs. Opaque or unmapped columns cannot, so they skip to PolySolver.
-    poly_defs = {c: d for c, d in mapping.defs.items() if not isinstance(d, Opaque)}
+    # canonical rungs. Opaque, quotient or unmapped columns cannot, so they
+    # skip to PolySolver.
+    not_poly = (Opaque, Quotient)
+    poly_defs = {c: d for c, d in mapping.defs.items() if not isinstance(d, not_poly)}
     blocked = mapping.unmapped | {
-        c for c, d in mapping.defs.items() if isinstance(d, Opaque)
+        c for c, d in mapping.defs.items() if isinstance(d, not_poly)
     }
     # Canonical keys of the reference constraints, for the "identical" rung.
     ref_keys = {_key(c) for c in ref.constraints} - {None}
@@ -337,6 +347,8 @@ def sweep(
     report.case_split_capped = solver.case_split_capped
     report.case_split_unsat = solver.case_split_unsat
     report.case_split_ms = round(solver.case_split_seconds * 1000)
+    report.nowrap_pins = solver.nowrap_pins
+    report.forks = solver.forks
     report.hints_accepted = solver.solved_accepted
     report.hints_rejected = solver.solved_rejected
     report.hints_on_retry = solver.solved_on_retry
@@ -400,6 +412,12 @@ def _by_tables_or_congruence(
     bus, _, args = key
     values = [constant(a) for a in args]
     ground = all(v is not None for v in values)
+    if bus == PC_LOOKUP:
+        # Congruence first: it needs no table, so a PcLookup the reference
+        # also has does not rest on trusting the program.
+        ob = _congruence(name, bi, defs, solver, ref, ref_index.get(key), mapped)
+        if ob is not None:
+            return ob
     if ground and (bus != PC_LOOKUP or program is not None):
         # Rung 3: constant arguments. Decide by the table, whatever the mult is:
         # a row makes "mult != 0 => row" true outright. A PcLookup's table is
@@ -450,6 +468,7 @@ _KIND_REASON = {
     "nowrap-missing-range": "near miss: range missing",
     "nowrap-bound": "near miss: sum may wrap",
     "no-match": "no single premise",
+    "quotient": "quotient case not proved",
 }
 
 
@@ -463,6 +482,8 @@ def _reason(kind: str, cols: set[str], mapping: Mapping) -> str:
         d = mapping.defs.get(c)
         if isinstance(d, Opaque) and isinstance(d.content, dict):
             kinds |= set(d.content)
+        elif isinstance(d, Quotient):
+            kinds.add("QuotientOrZero")
     if kinds == {"QuotientOrZero"}:
         return "opaque QuotientOrZero"
     if kinds == {"IfEqZero"}:

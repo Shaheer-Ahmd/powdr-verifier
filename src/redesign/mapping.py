@@ -30,6 +30,8 @@ from src.polysolver import (
     InvalidDefs,
     Opaque,
     PolySolver,
+    Quotient,
+    UnsupportedExpr,
     find_uniform_witness,
     find_witness,
     variables,
@@ -54,7 +56,7 @@ class Mapping:
     """The witness w for one direction, plus what we learned building it."""
 
     # Candidate-only column -> its term over reference columns.
-    defs: dict[str, Expr | Opaque] = field(default_factory=dict)
+    defs: dict[str, Expr | Opaque | Quotient] = field(default_factory=dict)
     # Column -> which source defined it: "derived", "substitution", "witness",
     # "zero witness", "lookup-only zero" or "lookup-only root".
     source: dict[str, str] = field(default_factory=dict)
@@ -75,7 +77,7 @@ def completeness_mapping(
     m = Mapping()
     # Only After-only columns need a definition; shared ones map to themselves.
     for col in _needed(after, before):
-        if not _from_derived(m, col, after) and not _from_subs(m, col, subs, before):
+        if not _from_derived(m, col, after, before) and not _from_subs(m, col, subs, before):
             m.unmapped.add(col)
     # powdr exports a definition for every column it adds, so a gap here is a
     # broken dump, not something to search for.
@@ -93,7 +95,7 @@ def soundness_mapping(
     left = [
         col
         for col in _needed(before, after)
-        if not _from_derived(m, col, before, skip_opaque=True)
+        if not _from_derived(m, col, before, after, skip_opaque=True)
         and not _from_subs(m, col, subs, after)
     ]
     # A column used only by lookups (no constraint mentions it) has nothing for
@@ -222,7 +224,9 @@ def _zero_witness(
     return None
 
 
-def _from_derived(m: Mapping, col: str, cand: Circuit, skip_opaque: bool = False) -> bool:
+def _from_derived(
+    m: Mapping, col: str, cand: Circuit, ref: Circuit, skip_opaque: bool = False
+) -> bool:
     """Define ``col`` by its ``derived_columns`` recipe, if it has one.
 
     ``skip_opaque`` (soundness) ignores the recipes PolySolver cannot read.
@@ -234,7 +238,7 @@ def _from_derived(m: Mapping, col: str, cand: Circuit, skip_opaque: bool = False
     recipes = cand.derived.get(col)
     if not recipes:
         return False
-    defs = [_recipe_def(r) for r in recipes]
+    defs = [_recipe_def(r, ref) for r in recipes]
     if skip_opaque:
         defs = [d for d in defs if not isinstance(d, Opaque)]
         if not defs:
@@ -244,14 +248,23 @@ def _from_derived(m: Mapping, col: str, cand: Circuit, skip_opaque: bool = False
     return True
 
 
-def _recipe_def(recipe: dict) -> Expr | Opaque:
-    """A recipe as a definition PolySolver accepts.
+def _recipe_def(recipe: dict, ref: Circuit) -> Expr | Opaque | Quotient:
+    """A recipe as a definition PolySolver accepts. Translation only.
 
-    Constants are polynomials. QuotientOrZero and IfEqZero are not, so they
-    become Opaque: still a valid witness, but PolySolver never looks inside.
+    Constants are polynomials. QuotientOrZero(n, d) with n and d over
+    reference columns is PolySolver's Quotient, which rule Q reads. Anything
+    else (IfEqZero, a quotient over other columns) becomes Opaque: still a
+    valid witness, but PolySolver never looks inside.
     """
     if set(recipe) == {"Constant"}:
         return recipe["Constant"]
+    if set(recipe) == {"QuotientOrZero"} and len(recipe["QuotientOrZero"]) == 2:
+        n, d = recipe["QuotientOrZero"]
+        try:
+            if variables(n) | variables(d) <= ref.columns:
+                return Quotient(n, d)
+        except UnsupportedExpr:
+            pass
     return Opaque(recipe)
 
 

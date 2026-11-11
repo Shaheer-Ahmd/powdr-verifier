@@ -57,7 +57,7 @@ def undecided(report):
 
 def test_baseline(dumps):
     cmp, snd = run(dumps)
-    assert undecided(cmp) == {"c14", "c15"}  # the gadget, by design (needs SMT)
+    assert cmp.verified  # the gadget: c14 by rule L, c15 by rule Q
     assert snd.verified
     assert snd.mapping.witnesses == [(sorted(MARKERS), "free_var_123@123")]
 
@@ -91,8 +91,9 @@ def test_c_break_the_witness(dumps):
     assert not snd.verified
     assert snd.mapping.unmapped == MARKERS  # no witness exists now
     assert undecided(snd) == {"c13"}  # the gadget sum, which mentions them
-    # Completeness cannot see this edit: f is opaque, so c15 was undecided anyway.
-    assert undecided(cmp) == {"c14", "c15"}
+    # Completeness sees it too: with f := QuotientOrZero(cmp, sum a), c15 + 1
+    # reads 1 when sum a != 0, so rule Q's first case fails.
+    assert undecided(cmp) == {"c15"}
 
 
 def test_d_remove_the_byte_ranges(dumps):
@@ -121,6 +122,6 @@ def test_e_weaken_before(dumps):
     cmp, snd = run(dumps, before_edit=edit)
     # A weaker Before is still implied by After, so soundness rightly passes.
     assert snd.verified and snd.counts()["nowrap-split"] == 3
-    # The bug is in completeness: (1 - cmp) * sum a no longer follows. It was
-    # already undecided, so the step stays not verified, never passed.
-    assert not cmp.verified and "c14" in undecided(cmp)
+    # The bug is in completeness: (1 - cmp) * sum a no longer follows, as
+    # rule L has no (1 - cmp) * a0 to add up.
+    assert not cmp.verified and undecided(cmp) == {"c14"}

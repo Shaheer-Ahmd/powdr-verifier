@@ -54,12 +54,17 @@ DISCHARGED_ROWS = [
         "split of a reference sum constraint, using byte ranges",
     ),
     ("nowrap-split", "via mapping", "same, after substituting mapped columns"),
+    ("sum", "direct", "G * (t1 + ... + tn), with every G * tj implied"),
+    ("sum", "via mapping", "same, after substituting mapped columns"),
+    ("quotient-split", "via mapping", "a QuotientOrZero column: both cases of its denominator"),
 ]
 RUNG_NOTE = {
     "trivial": "rung 1",
     "identical": "rung 2, lens canon_zero",
     "normalize": "PolySolver rule N",
     "nowrap-split": "PolySolver rule S",
+    "sum": "PolySolver rule L",
+    "quotient-split": "PolySolver rule Q",
 }
 # The same for stateless bus interactions.
 BUS_ROWS = [

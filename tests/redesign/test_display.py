@@ -40,9 +40,11 @@ def test_bus_only_reason_on_memory_pass():
 
 def test_is_zero_reasons():
     cmp, snd = check("keccak", "2106332", "008", "009")
-    assert sorted(o.reason for o in cmp.obligations if o.rung == "undecided") == [
-        "nonlinear, no match",  # (1 - cmp) * sum a: a sum of four premises
-        "opaque QuotientOrZero",  # f * sum a - cmp
+    (cmp_plain,) = check("keccak", "2106332", "008", "009", ("completeness",),
+                         use_ranges=False)
+    assert cmp.verified
+    assert sorted(o.reason for o in cmp_plain.obligations if o.rung == "undecided") == [
+        "quotient case not proved",  # f * sum a - cmp: sum a = 0 needs the byte ranges
     ]
     assert snd.categories()[("constraint", "normalize", "via mapping")] == 1  # witness
 

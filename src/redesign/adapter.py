@@ -17,6 +17,7 @@ def reference_solver(
     constants: bool = False,
     one_hot: bool = True,
     case_split: bool = True,
+    nowrap_pins: bool = True,
 ) -> PolySolver:
     """Premises and ranges from the reference side only (the polarity rule).
 
@@ -30,7 +31,8 @@ def reference_solver(
     again when something it reads changes. A hint rejected in the end costs
     completeness only. With ``case_split``, a hint about a variable with
     three values that the check cannot decide gets a case split over the
-    variable's group (rule C).
+    variable's group (rule C). With ``nowrap_pins``, a premise that is a sum
+    of ranged variables that cannot wrap pins each of them to 0 (rule S').
     """
     s = PolySolver(
         table,
@@ -38,6 +40,7 @@ def reference_solver(
         constants=constants,
         one_hot=one_hot,
         case_split=case_split,
+        nowrap_pins=nowrap_pins,
     )
     for i, c in enumerate(ref.constraints):
         s.add_premise(c, tag=f"{ref.label}:c{i}")

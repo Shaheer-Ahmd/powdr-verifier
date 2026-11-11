@@ -141,6 +141,21 @@ def substitute(
     return out
 
 
+def split_linear(a: Poly, v: int) -> tuple[Poly, Poly] | None:
+    """``(a1, a0)`` with ``a = a1 * v + a0`` and v in neither; None if v occurs squared."""
+    a1: Poly = {}
+    a0: Poly = {}
+    for m, c in a.items():
+        e = next((e for x, e in m if x == v), 0)
+        if e == 0:
+            a0[m] = c
+        elif e == 1:
+            a1[tuple(xe for xe in m if xe[0] != v)] = c
+        else:
+            return None
+    return a1, a0
+
+
 def variables_of(a: Poly) -> set[int]:
     """The variables that occur in a polynomial."""
     return {v for m in a for v, _ in m}

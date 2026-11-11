@@ -40,12 +40,23 @@ def test_is_zero_soundness_without_ranges(block):
 
 
 @pytest.mark.parametrize("block", IS_ZERO)
-def test_is_zero_completeness_by_design(block):
+def test_is_zero_completeness(block):
+    # (1 - cmp) * sum a is the sum of Before's (1 - cmp) * a_i (rule L), and
+    # f * sum a - cmp with f := QuotientOrZero(cmp, sum a) splits on sum a
+    # (rule Q; the sum = 0 case needs rule S' to pin the bytes).
     cmp, _ = check("keccak", block, "008", "009")
-    undecided = _by_rung(cmp, "undecided")
-    assert len(undecided) == 2  # needs SMT: a sum of premises, and opaque QuotientOrZero
-    assert any("opaque" in o.detail for o in undecided)
-    assert all(o.rung in ("identical", "undecided") for o in cmp.obligations)
+    assert cmp.verified
+    assert len(_by_rung(cmp, "sum")) == len(_by_rung(cmp, "quotient-split")) == 1
+    assert all(o.rung in ("identical", "sum", "quotient-split") for o in cmp.obligations)
+
+
+@pytest.mark.parametrize("block", IS_ZERO[:2])
+def test_is_zero_completeness_without_nowrap_pins(block):
+    # Without rule S' the fork for sum a = 0 cannot pin the bytes, so the
+    # quotient's zero case stays open. Rule L needs no ranges.
+    (cmp,) = check("keccak", block, "008", "009", ("completeness",), use_nowrap_pins=False)
+    assert [o.reason for o in _by_rung(cmp, "undecided")] == ["quotient case not proved"]
+    assert len(_by_rung(cmp, "sum")) == 1
 
 
 def test_noop_step_both_directions():
@@ -133,7 +144,7 @@ def test_load_store_flags_two_fits_agree_on():
     (cmp,) = check("keccak", "2099796", "002", "003", ("completeness",))
     # The one lookup rule C leaves is a PcLookup, a row of the block's program.
     assert (cmp.counts("constraint")["undecided"], cmp.counts("bus")["undecided"]) == (6, 0)
-    assert cmp.counts("bus")["evaluated-program"] == 8  # one per instruction
+    assert cmp.counts("bus")["evaluated-program"] == 1  # the rest go by congruence
     names = {h[0] for h in cmp.hints if h[1]}
     assert {"flags__0_3@136", "flags__3_3@139", "is_load_3@141"} <= names
 
