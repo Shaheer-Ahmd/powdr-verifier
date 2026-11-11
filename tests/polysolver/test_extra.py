@@ -132,14 +132,20 @@ def test_rule_s_finds_a_sum_hidden_by_cancellation():
     assert v.rule == "nowrap-split" and set(v.ranges) == {"a", "b"}
 
 
-def test_rule_s_rejects_a_sum_of_squares():
+def test_rule_s_splits_a_sum_of_squares_into_its_forms_only():
     sq = add(*[mul(sub(f"a{i}", f"b{i}"), sub(f"a{i}", f"b{i}")) for i in range(4)])
     names = ["c"] + [f"{x}{i}" for x in "ab" for i in range(4)]
     s = PolySolver(VarTable(), declared=names)
     s.add_premise(mul("c", sq), tag="p")
     s.add_range("a0", 0, 255, "r")
+    # c * sum (a_i - b_i)^2 says nothing of a0 alone: its terms are the a_i - b_i.
     assert isinstance(s.implies(mul("c", "a0")), Unknown)
-    assert s._premises[0].sums == []  # expanded, found nonlinear, not a sum
+    v = s.implies(mul("c", sub("a0", "b0")))
+    assert isinstance(v, Unknown) and v.kind == "nowrap-missing-range"
+    for n in names[1:]:
+        s.add_range(n, 0, 255, f"r_{n}")
+    assert isinstance(s.implies(mul("c", "a0")), Unknown)
+    assert s.implies(mul("c", sub("a0", "b0"))).rule == "nowrap-split"
 
 
 def _weighted(order, premise, hi=255):

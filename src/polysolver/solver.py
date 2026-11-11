@@ -40,11 +40,10 @@ Rules that add to the store, each a local implication:
   over those sets, so x = v holds if every solution has x = v
   (enumeration.fixed_values). Leaving premises out of Q loses completeness
   only.
-- S' (no-wrap pins): a premise over ranged variables that reads as a sum
-  of non-negative terms, c_i * a_i and c_j * L_j^2 with L_j affine, whose
-  integer value cannot reach p. The integer sum is then 0, so every term is:
-  a_i = 0 and L_j = 0. A one-variable L_j is a pin; one over several
-  variables is an equation x = t, which goes into Sol.
+- S' (no-wrap pins): rule S below with G = 1, for the terms a domain can
+  hold. A premise over ranged variables that reads as a sum of non-negative
+  terms whose integer value cannot reach p gives a_i = 0 for each linear
+  term, and x = -t/w for each square (w*x + t)^2 over one variable.
 - Collapse: a domain with one value v gives x = v, which goes into Sol.
 - Checked equation: x = t (add_solved) goes into Sol only once rule N or S
   proves x - t.
@@ -55,8 +54,12 @@ policy is to use nothing (C's are counted).
 Rules that answer a query, q rewritten under Sol and Defs, cheapest first:
 - N (normalize): q has the same zero key as a premise, so they differ by a
   nonzero factor.
-- S (no-wrap split): a premise G * (c1*a1 + ... + cn*an) with ranged a_i
-  whose weighted sum cannot reach p implies G * a_j = 0 for every j.
+- S (no-wrap split): a premise G * (sum c_i*a_i + sum c_j*L_j^2), each L_j
+  an affine form w.x + t, over ranged variables. With every c as its
+  representative in [1, p) and every w and t as a signed integer, each term
+  is a non-negative integer. If their sum cannot reach p (_no_wrap_terms),
+  then where G != 0 the sum is 0, so every term is: the premise implies
+  G * a_i = 0 and G * L_j = 0.
 - L (sum), the reverse of S, with no side condition: q is written
   G * (t_1 + ... + t_n), and N or S proves G * t_j for every j. Then q, their
   sum, is 0.
@@ -80,9 +83,10 @@ The contract that keeps each rule local:
   naming every premise and domain they read (_premise_tags, _domain_tags).
   O's group index only says where its selector part should look, and that
   part re-reads the group.
-- _substitute is called only for pins (_substitute_pins), for checked
-  equations (_check_solved), and for the equations S' reads off a square
-  (_rule_s_pins).
+- _substitute is called only for pins (_substitute_pins) and for
+  checked equations (_check_solved). An equation between several variables
+  (a_i = b_i from a sum of squares) is therefore never a rule's conclusion:
+  it is proposed, and rule S checks it like any other.
 
 Triggers, which are scheduling only:
 - add_premise: D on a premise that mentions one variable as written.
@@ -295,7 +299,6 @@ class PolySolver:
         self.case_split_unsat = 0  # searches with no fit: the premises contradict each other
         self.case_split_seconds = 0.0  # its own time
         self.nowrap_pins = 0  # variables rule S' pinned
-        self.nowrap_equations = 0  # equations x = t rule S' read off a square
         self.forks = 0  # child solvers made for rule Q
         # (tag, last verdict, agreed with x's value) per equation, in call order
         self.solved_log: list[tuple[str, Verdict, bool]] = []
@@ -886,11 +889,14 @@ class PolySolver:
     # ------------------------------------------------------------ rule S
 
     def _premise_sums(self, i: int) -> list:
-        """The premise's top-level factors that are sums c1*a1 + ... + cn*an.
+        """The premise's top-level factors that read as a sum of non-negative terms.
 
-        Computed on first use and cached, so only premises that rule S actually
-        looks at are ever split. Each factor is fully expanded, so a factor that
-        becomes a sum only after cancellation (x*y - x*y + a + b) is still found.
+        Each is (factor position, {a_i: c_i}, squares): the factor is
+        sum c_i * a_i + sum c_j * L_j^2 with L_j affine (_nonneg_terms), and
+        has two terms or more, or a square. Computed on first use and cached,
+        so only premises that rule S actually looks at are ever split. Each
+        factor is fully expanded, so a factor that becomes a sum only after
+        cancellation (x*y - x*y + a + b) is still found.
         """
         prem = self._drop_stale(self._premises[i])
         if prem.sums is None:
@@ -902,13 +908,9 @@ class PolySolver:
                 if len(prem.factor_vars[fi]) < 2:
                     continue
                 poly = self._factor_poly(prem, fi)
-                # Linear with no constant: every term is one variable to the power 1.
-                if (
-                    poly
-                    and len(poly) >= 2
-                    and all(len(m) == 1 and m[0][1] == 1 for m in poly)
-                ):
-                    prem.sums.append((fi, poly))
+                terms = self._nonneg_terms(poly) if poly else None
+                if terms is not None and (terms[1] or len(terms[0]) >= 2):
+                    prem.sums.append((fi, *terms))
         return prem.sums
 
     def _factor_poly(self, prem: _Premise, fi: int) -> P.Poly | None:
@@ -923,10 +925,14 @@ class PolySolver:
         return prem.polys[fi]
 
     def _rule_s(self, k: P.Key) -> Verdict:
-        """Rule S: q is G * a, where some premise is G * (sum containing a).
+        """Rule S: q is G * T, where some premise is G * (a sum with the term T).
 
-        If no summand can wrap past p, G * sum = 0 forces G * a = 0 for every
-        summand a. Only ranged variables of q can play the role of a.
+        The sum reads sum c_i * a_i + sum c_j * L_j^2 over ranged variables,
+        and T is an a_i or an L_j. If the integer value of the sum cannot
+        reach p (_no_wrap_terms), then in a model with G != 0 the sum is 0
+        mod p, hence 0, hence every term is 0: a_i = 0 and L_j = 0. In a
+        model with G = 0, G * T is 0 anyway. Only ranged variables of q can
+        occur in T.
         """
         notes, kind = [], "no-match"
         for a in sorted(P.key_vars(k)):
@@ -937,21 +943,22 @@ class PolySolver:
             for idx in self._coi_premise_ids(a):
                 sums = self._premise_sums(idx)
                 prem = self._premises[idx]
-                for fi, s in sums:
-                    if ((a, 1),) not in s:
+                for fi, linear, squares in sums:
+                    term = self._term_with(a, linear, squares)
+                    if term is None:
                         continue
-                    g = self._other_factors_times(prem, fi, a)
+                    g = self._other_factors_times(prem, fi, term)
                     # The shape must match q (up to a constant factor) first.
                     if g is None or P.zkey(g, self.p) != k:
                         continue
                     # The shape matches; only the no-wrap condition is left.
-                    why = self._no_wrap(s)
+                    why = self._no_wrap_terms(linear, squares)
                     if why:
                         kind, msg = why
                         notes.append(f"{prem.tag}: {msg}")
                         continue
-                    # Report every summand: all their ranges were used.
-                    ranged = sorted(self.table.name(v) for ((v, _),) in s)
+                    # Report every variable of the sum: all their ranges were used.
+                    ranged = sorted(self.table.name(v) for v in self._term_vars(linear, squares))
                     return Implied(
                         "nowrap-split",
                         (prem.tag,),
@@ -962,9 +969,26 @@ class PolySolver:
             "S: " + ("; ".join(notes) if notes else "no ranged sum premise"), kind
         )
 
-    def _other_factors_times(self, prem: _Premise, fi: int, a: Var) -> P.Poly | None:
-        """G * a, where G is the product of the premise's factors other than ``fi``."""
-        g = P.var_poly(a)
+    @staticmethod
+    def _term_with(a: Var, linear: dict, squares: list) -> P.Poly | None:
+        """The term of the sum that mentions a: a itself, or the affine form L_j."""
+        if a in linear:
+            return P.var_poly(a)
+        for _, w, t in squares:
+            if a in w:
+                form = {((v, 1),): c for v, c in w.items()}
+                if t:
+                    form[()] = t
+                return form
+        return None
+
+    @staticmethod
+    def _term_vars(linear: dict, squares: list) -> set[Var]:
+        return set(linear).union(*(w for _, w, _ in squares))
+
+    def _other_factors_times(self, prem: _Premise, fi: int, term: P.Poly) -> P.Poly | None:
+        """G * term, where G is the product of the premise's factors other than ``fi``."""
+        g = term
         try:
             for j in range(len(prem.factors)):
                 if j != fi:
@@ -975,27 +999,6 @@ class PolySolver:
         except P.ExpansionLimit:
             return None
         return g
-
-    def _no_wrap(self, s: P.Poly) -> tuple[str, str] | None:
-        """(kind, message) saying why the sum ``s`` might wrap past p, or None."""
-        # Every summand needs an upper bound, or the sum could be anything.
-        missing = [self.table.name(v) for ((v, _),) in s if v not in self._domains]
-        if missing:
-            return "nowrap-missing-range", f"no range for {', '.join(sorted(missing))}"
-        # With 0 <= a_i <= hi_i the integer sum is at most sum c_i * hi_i. If that
-        # stays below p, "sum = 0 mod p" means the integer sum is 0, so each a_i = 0.
-        # Any unit multiple k*s has the same zeros, so one k whose bound fits is
-        # enough. Making s monic alone can hide a small sum: 2a + 3b becomes
-        # a + (3/2)b, and 3/2 is huge in F_p. So try s as written, -s, and s made
-        # monic in each of its terms, and keep the smallest bound.
-        scales = {1, self.p - 1} | {pow(c, self.p - 2, self.p) for c in s.values()}
-        bound = min(
-            sum(c * k % self.p * self._domains[v].hi for ((v, _),), c in s.items())
-            for k in scales
-        )
-        if bound >= self.p:
-            return "nowrap-bound", f"sum of c_i * hi_i is {bound} >= p"
-        return None
 
     # ------------------------------------------------------------ rule L
 
@@ -1128,7 +1131,8 @@ class PolySolver:
         It gets, on the same table: the premises within FORK_HOPS of
         ``seeds`` (as written, with their tags), the solved equations those
         premises mention, the domains of the variables involved, and the
-        premise ``a`` under ``tag``; then its work list runs. Every copied
+        premise ``a`` under ``tag``; then its work list runs, and the
+        equations read off ``a``'s squares are checked (add_solved_all). Every copied
         fact holds in every model of this solver's P and R (invariant I), so
         every such model with a = 0 is a model of the fork's inputs: what
         the fork proves holds in all of them. Leaving facts out is sound.
@@ -1178,6 +1182,11 @@ class PolySolver:
             child.add_premise(self._premises[i].expr, self._premises[i].tag)
         child.add_premise(self._poly_expr(a), tag)
         child.propagate()
+        # The assumption may be a sum of squares, e.g. sum (a_i - b_i)^2. Its
+        # equations a_i = b_i are proposed like any hint, and rule S checks them.
+        proposed = child._square_equations(len(child._premises) - 1, tag)
+        if proposed:
+            child.add_solved_all(proposed)
         return child
 
     def _poly_expr(self, a: P.Poly) -> Expr:
@@ -1205,52 +1214,57 @@ class PolySolver:
             self._rule_s_pins(i)
 
     def _rule_s_pins(self, i: int) -> None:
-        """Rule S' on premise i, whose variables are all ranged: every term of a no-wrap sum is 0.
+        """Rule S' on premise i, whose variables are all ranged: pin the one-variable terms.
 
         Premise: i reads  sum_i c_i * a_i  +  sum_j c_j * L_j^2  with no
-        other term, each L_j an affine form w.x + t over its own variables
-        (_nonneg_terms). Side condition (_no_wrap_terms): for some unit
-        multiple, with every c as its representative in [1, p) and every w
-        and t as a signed integer, the largest value the integer sum can
-        take over the ranges stays below p. Each term is a non-negative
-        integer (ranges start at 0 or above; a square), their sum is 0 mod p
-        and below p, so it is 0 and every term is 0: a_i = 0 and L_j = 0.
-        Conclusions: a_i = 0 and a one-variable L_j narrow a domain; an L_j
-        over several variables is an equation x = t, substituted like a
-        checked one. Tags: the premise and the domains of all its variables.
+        other term (_nonneg_terms), and its integer value cannot reach p
+        (_no_wrap_terms). As in rule S with G = 1, every term is then 0.
+        Conclusions, through _narrow_domain only: a_i = 0, and x = -t/w for
+        an L_j = w*x + t over one variable. An L_j over several variables is
+        an equation, which no domain holds: rule S proves it as a query, and
+        it enters Sol only as a checked equation (see _square_equations).
+        Tags: the premise and the domains of all its variables.
         """
         k = self._premise_key(i)
-        if not k or any(P.degree(m) > 2 for m, _ in k):
-            return
-        terms = self._nonneg_terms(dict(k))
+        terms = self._nonneg_terms(dict(k)) if k else None
         if terms is None:
             return
         linear, squares = terms
-        if len(linear) + len(squares) < 2 and not squares:
+        if not squares and len(linear) < 2:
             return  # one variable: rule D's
-        if not self._no_wrap_terms(linear, squares):
+        if self._no_wrap_terms(linear, squares):
             return
-        vs = set(linear).union(*(w for _, w, _ in squares)) if squares else set(linear)
-        tags = self._premise_tags(i) + self._domain_tags(sorted(vs))
+        tags = self._premise_tags(i) + self._domain_tags(sorted(self._term_vars(linear, squares)))
         for v in linear:
             self.nowrap_pins += self._narrow_domain(v, 0, 0, tags)
         for _, w, t in squares:
-            # L = sum w_v * v + t = 0: solve it for one variable.
+            if len(w) == 1:
+                ((x, wx),) = w.items()
+                value = -t * pow(wx, self.p - 2, self.p) % self.p
+                self.nowrap_pins += self._narrow_domain(x, value, value, tags, frozenset((value,)))
+
+    def _square_equations(self, i: int, tag: str) -> list[tuple[str, Expr, str]]:
+        """Candidate equations x = t from premise i's squares over several variables.
+
+        For each L_j = w.x + t of the premise's reading, L_j solved for one
+        variable. Proposals only, for add_solved_all: each is used only once
+        rule S proves x - t, which is where the no-wrap bound is checked.
+        """
+        k = self._premise_key(i)
+        terms = self._nonneg_terms(dict(k)) if k else None
+        out = []
+        for _, w, t in terms[1] if terms else ():
+            if len(w) < 2:
+                continue
             x = max(w, key=self.table.name)
             inv = pow(w[x], self.p - 2, self.p)
-            if len(w) == 1:
-                value = -t * inv % self.p
-                self.nowrap_pins += self._narrow_domain(x, value, value, tags, frozenset((value,)))
-                continue
             rhs = P.const(-t * inv, self.p)
             for v, c in w.items():
                 if v != x:
                     rhs[((v, 1),)] = -c * inv % self.p
-            try:
-                self._substitute(x, rhs, tuple(dict.fromkeys(tags)))
-            except P.ExpansionLimit:
-                continue
-            self.nowrap_equations += 1
+            name = self.table.name(x)
+            out.append((name, self._poly_expr(rhs), f"{tag}: {name}"))
+        return out
 
     def _nonneg_terms(self, a: P.Poly) -> tuple[dict, list] | None:
         """Read ``a`` as  sum c_i * a_i + sum c_j * (w_j . x + t_j)^2, or None.
@@ -1277,7 +1291,7 @@ class PolySolver:
                 lin[m[0][0]] = c
             elif len(m) == 1 and m[0][1] == 2:
                 diag[m[0][0]] = c
-            elif len(m) == 2:
+            elif len(m) == 2 and m[0][1] == m[1][1] == 1:
                 cross[frozenset((m[0][0], m[1][0]))] = c
             else:
                 return None
@@ -1329,16 +1343,29 @@ class PolySolver:
         linear = {v: c for v, c in lin.items() if v not in diag}
         return linear, squares
 
-    def _no_wrap_terms(self, linear: dict, squares: list) -> bool:
-        """True if, for some unit multiple, the integer sum of the terms stays below p.
+    def _no_wrap_terms(self, linear: dict, squares: list) -> tuple[str, str] | None:
+        """(kind, message) saying why the sum of the terms might reach p, or None.
 
-        Linear terms: (k * c_i mod p) * hi_i. A square, for the best pivot:
+        Every variable needs a range, or the sum could be anything. Then, for
+        some unit multiple k (any k*s has the same zeros): a linear term
+        counts (k * c_i mod p) * hi_i, and a square, for its best pivot,
         (k * c mod p) * M^2, where M is the largest |w.x + t| over the ranges
         with w and t as signed integers in (-p/2, p/2). These integers are
         congruent to the field values, so the integer sum is congruent to k
-        times the premise, which is 0.
+        times the sum, and each of its terms is non-negative. If the total
+        stays below p, "sum = 0 mod p" means the integer sum is 0, so every
+        term is 0. Making the sum monic alone can hide a small one: 2a + 3b
+        becomes a + (3/2)b, and 3/2 is huge in F_p. So k is tried among 1,
+        -1 and the inverse of each coefficient, and the smallest total kept.
         """
         p = self.p
+        missing = [
+            self.table.name(v)
+            for v in self._term_vars(linear, squares)
+            if v not in self._domains
+        ]
+        if missing:
+            return "nowrap-missing-range", f"no range for {', '.join(sorted(missing))}"
 
         def signed(c: int) -> int:
             return c - p if c > p // 2 else c
@@ -1355,12 +1382,14 @@ class PolySolver:
                 options.append((c, max(abs(lo), abs(hi)) ** 2))
             sized.append(options)
         coeffs = list(linear.values()) + [c for options in sized for c, _ in options]
-        for k in {1, p - 1} | {pow(c, p - 2, p) for c in coeffs}:
-            bound = sum(c * k % p * self._domains[v].hi for v, c in linear.items())
-            bound += sum(min(c * k % p * m2 for c, m2 in options) for options in sized)
-            if bound < p:
-                return True
-        return False
+        bound = min(
+            sum(c * k % p * self._domains[v].hi for v, c in linear.items())
+            + sum(min(c * k % p * m2 for c, m2 in options) for options in sized)
+            for k in {1, p - 1} | {pow(c, p - 2, p) for c in coeffs}
+        )
+        if bound >= p:
+            return "nowrap-bound", f"the sum can reach {bound} >= p"
+        return None
 
     def _rule_o(self, i: int) -> None:
         """Rule O on premise i, whose variables are all in [0, 1]: group part, then selector part.

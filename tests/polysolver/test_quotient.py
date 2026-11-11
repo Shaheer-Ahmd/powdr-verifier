@@ -277,7 +277,7 @@ def test_split_linear():
     assert poly.split_linear({}, x) == ({}, {})
 
 
-# ------------------------------------------------------------ rule S': squares
+# ------------------------------------------------------------ squares: rules S and S'
 
 
 def square(e):
@@ -293,17 +293,38 @@ def ranged(names, premise, hi=255, **kw):
     return s
 
 
-def test_sum_of_squares_gives_equations():
-    # (a0 - b0)^2 + (a1 - b1)^2 = 0 over bytes: a0 = b0 and a1 = b1.
-    s = ranged(["a0", "b0", "a1", "b1"], add(square(sub("a0", "b0")), square(sub("a1", "b1"))))
-    assert s.nowrap_equations == 2
+TWO_SQUARES = add(square(sub("a0", "b0")), square(sub("a1", "b1")))
+NAMES = ["a0", "b0", "a1", "b1"]
+
+
+def test_sum_of_squares_implies_each_form_by_rule_s():
+    # (a0 - b0)^2 + (a1 - b1)^2 = 0 over bytes: a0 = b0 and a1 = b1. An
+    # equation between two variables is a query, never a store fact.
+    s = ranged(NAMES, TWO_SQUARES)
+    assert s.nowrap_pins == 0 and s.solved_count == 0
     v = s.implies(sub("a0", "b0"))
-    assert isinstance(v, Implied) and {"p", "r:a0", "r:b0"} <= set(v.solved)
-    assert isinstance(s.implies(sub("a1", "b1")), Implied)
+    assert isinstance(v, Implied) and v.rule == "nowrap-split"
+    assert v.premises == ("p",) and set(v.ranges) == set(NAMES)
+    assert isinstance(s.implies(mul(7, sub("b1", "a1"))), Implied)
     assert isinstance(s.implies(sub("a0", "b1")), Unknown)
+    assert isinstance(s.implies("a0"), Unknown)
 
 
-def test_affine_squares_and_linear_terms_mix():
+def test_gated_sum_of_squares():
+    s = ranged(["g", *NAMES], mul("g", TWO_SQUARES))
+    assert s.implies(mul("g", sub("a0", "b0"))).rule == "nowrap-split"
+    assert isinstance(s.implies(sub("a0", "b0")), Unknown)  # only where g != 0
+
+
+def test_square_equation_enters_sol_only_as_a_checked_equation():
+    s = ranged([*NAMES, "y"], add(TWO_SQUARES, mul(0, "y")))
+    assert isinstance(s.add_solved("a0", "b0", "hint"), Implied)
+    v = s.implies(sub(mul("a0", "y"), mul("b0", "y")))  # rewritten under a0 := b0
+    assert isinstance(v, Implied) and v.solved == ("hint",)
+    assert isinstance(s.add_solved("a1", "b0", "wrong"), Unknown)
+
+
+def test_affine_squares_and_linear_terms_are_pins():
     # keccak 2100224: (a0 - 32)^2 + (a1 - 99)^2 + (a2 - 32)^2 + a3 = 0.
     d = add(square(sub("a0", 32)), square(sub("a1", 99)), square(sub("a2", 32)), "a3")
     s = ranged(A, d)
@@ -313,11 +334,11 @@ def test_affine_squares_and_linear_terms_mix():
 
 
 def test_square_with_weights():
-    # The unit multiple is tried among the inverses of the coefficients, as in
-    # rule S: 1/4 of this premise's key reads (2a - b)^2 + 2c.
+    # The unit multiple is tried among the inverses of the coefficients:
+    # 1/4 of this premise's key reads (2a - b)^2 + 2c.
     s = ranged(["a", "b", "c"], add(mul(3, square(sub(mul(2, "a"), "b"))), mul(6, "c")))
-    assert isinstance(s.implies(sub(mul(2, "a"), "b")), Implied)
-    assert isinstance(s.implies("c"), Implied)
+    assert s.implies(sub(mul(2, "a"), "b")).rule == "nowrap-split"
+    assert s.nowrap_pins == 1 and isinstance(s.implies("c"), Implied)  # S' pins c
     assert isinstance(s.implies("a"), Unknown)
 
 
@@ -330,37 +351,42 @@ def test_square_with_weights():
         add(square(sub("a", "b")), mul("a", "c")),  # a stray cross term
         add(square(sub("a", "b")), "a"),  # a linear term on a squared variable
         add(mul("a", mul("a", "a")), "b"),  # degree 3
+        add(mul(mul("a", "a"), "b"), "c"),  # degree 3, two variables
     ],
 )
 def test_squares_decline(premise):
     s = ranged(["a", "b", "c"], premise)
-    assert s.nowrap_pins == 0 and s.nowrap_equations == 0
+    assert s.nowrap_pins == 0
+    for q in ("a", "b", "c", sub("a", "b")):
+        assert isinstance(s.implies(q), Unknown)
 
 
 def test_squares_need_the_bound():
-    # Over 16-bit ranges four squares can reach 4 * 65535^2 > p.
-    names = ["a0", "b0", "a1", "b1"]
-    s = ranged(names, add(square(sub("a0", "b0")), square(sub("a1", "b1"))), hi=2**16 - 1)
-    assert s.nowrap_equations == 0
-    s = ranged(names, add(square(sub("a0", "b0")), square(sub("a1", "b1"))), hi=2**14)
-    assert s.nowrap_equations == 2
+    # Over 16-bit ranges two squares can reach 2 * 65535^2 > p.
+    s = ranged(NAMES, TWO_SQUARES, hi=2**16 - 1)
+    v = s.implies(sub("a0", "b0"))
+    assert isinstance(v, Unknown) and v.kind == "nowrap-bound"
+    assert isinstance(ranged(NAMES, TWO_SQUARES, hi=2**14).implies(sub("a0", "b0")), Implied)
 
 
 def test_squares_need_every_range():
-    s = PolySolver(VarTable(), declared=["a", "b"])
-    s.add_premise(square(sub("a", "b")), "p")  # sound even so, but D and S' both pass
-    s.add_range("a", 0, 255, "a")
+    s = PolySolver(VarTable(), declared=NAMES)
+    s.add_premise(TWO_SQUARES, "p")
+    for x in NAMES[:3]:
+        s.add_range(x, 0, 255, x)
     s.propagate()
-    assert s.nowrap_equations == 0
+    v = s.implies(sub("a0", "b0"))
+    assert isinstance(v, Unknown) and v.kind == "nowrap-missing-range" and "b1" in v.note
 
 
 def test_squares_are_sound_on_small_field():
-    # Brute force over F_101: whatever S' concludes holds in every model.
+    # Brute force over F_101: whatever S and S' prove holds in every model.
     p = 101
     shapes = [
         lambda c, w, t: add(mul(c, square(add("a", mul(w, "b"), t))), "c"),
         lambda c, w, t: add(square(sub("a", mul(w, "b"))), mul(c, square(sub("c", t)))),
         lambda c, w, t: add(mul(c, square(sub("a", "b"))), mul(w, "c"), t),
+        lambda c, w, t: mul(sub("c", t), add(square(sub("a", mul(w, "b"))), mul(c, "a"))),
     ]
     fired = 0
     for shape in shapes:
@@ -374,12 +400,13 @@ def test_squares_are_sound_on_small_field():
                         for x in "abc":
                             s.add_range(x, 0, hi, x)
                         s.propagate()
-                        if not (s.nowrap_pins or s.nowrap_equations):
+                        forms = ["a", "b", "c", sub("a", "b"), sub("a", mul(w, "b")),
+                                 add("a", mul(w, "b"), t), sub("c", t)]
+                        queries = forms + [mul(sub("c", t), f) for f in forms]
+                        proved = [q for q in queries if isinstance(s.implies(q), Implied)]
+                        if not proved:
                             continue
                         fired += 1
-                        queries = ["a", "b", "c", sub("a", "b"), sub("a", mul(w, "b")),
-                                   add("a", mul(w, "b"), t), sub("c", t)]
-                        proved = [q for q in queries if isinstance(s.implies(q), Implied)]
                         for a in range(hi + 1):
                             for b in range(hi + 1):
                                 for cc in range(hi + 1):
@@ -404,4 +431,6 @@ def test_squared_is_zero_gadget_through_rule_q():
     defs = s.make_defs({"f": Quotient("cmp", d)})
     v = s.implies(sub(mul("f", d), "cmp"), defs)
     assert isinstance(v, Implied) and v.rule == "quotient-split"
-    assert s.nowrap_equations == 0  # the equations stay in the fork
+    # In the fork the four a_i = b_i are checked equations; none leaks out.
+    assert any(t.startswith("assume f's denominator = 0: ") for t in v.solved)
+    assert s.solved_count == 0 and isinstance(s.implies(diffs[0]), Unknown)
