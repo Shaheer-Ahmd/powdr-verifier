@@ -117,3 +117,47 @@ def test_extend_defs_adds_one_definition():
     assert not base.defines(s.table.var("x"))  # the original is untouched
     again = s.extend_defs(more, "x", 5)  # a second value replaces the first
     assert isinstance(s.implies(["x", "-", 5], again), Implied)
+
+
+# ------------------------------------------------------------ opaque recipes
+
+
+def test_markers_with_an_opaque_recipe_get_zero():
+    # remove_disconnected drops m*(m - 1) for diff_marker columns whose recipe
+    # is an IfEqZero chain. Soundness skips the recipe; 0 satisfies booleanity.
+    cmp, snd = check("keccak", "2104736", "016", "017")
+    markers = [c for c in snd.mapping.defs if c.startswith("diff_marker")]
+    assert len(markers) == 8
+    assert all(snd.mapping.defs[c] == 0 for c in markers)
+    assert {snd.mapping.source[c] for c in markers} == {"zero witness"}
+    assert not [o for o in snd.obligations if o.reason.startswith("opaque")]
+
+
+def test_opaque_recipe_is_skipped_only_in_soundness():
+    recipe = {"IfEqZero": ["a", {"Constant": 0}, {"Constant": 1}]}
+    with_m = circuit("m", [["a", "*", ["a", "-", 1]], ["m", "*", ["m", "-", 1]]],
+                     derived=[[False, "m", recipe]])
+    without = circuit("n", [["a", "*", ["a", "-", 1]]])
+    # Soundness (m is Before-only): the recipe is skipped and m := 0 is kept.
+    (snd,) = check_step(with_m, without, {}, ("soundness",))
+    assert snd.verified and snd.mapping.defs["m"] == 0
+    # Completeness (m is After-only): the recipe is what the prover runs.
+    (cmp,) = check_step(without, with_m, {}, ("completeness",))
+    assert not cmp.verified
+    assert [o.reason for o in cmp.obligations if o.rung == "undecided"] == ["opaque IfEqZero"]
+
+
+def test_zero_witness_is_kept_only_if_the_constraints_hold():
+    before = circuit("b", [["m", "-", 1]], derived=[[False, "m", {"IfEqZero": [0, 0, 1]}]])
+    (snd,) = check_step(before, circuit("a"), {}, ("soundness",))
+    assert snd.mapping.unmapped == {"m"} and not snd.verified
+
+
+def test_opaque_lookup_only_column_falls_through_to_a_root():
+    # diff_val's shape: 0 is not a row of [x - 1, 0, 0, 0]; the root 1 is.
+    recipe = {"IfEqZero": ["a", {"Constant": 1}, {"QuotientOrZero": [["a", "-", 1], 1]}]}
+    before = circuit("b", [["a", "*", ["a", "-", 1]]],
+                     [lookup(6, ["x", "-", 1], 0, 0, 0)], [[False, "x", recipe]])
+    after = circuit("a", [["a", "*", ["a", "-", 1]]])
+    (snd,) = check_step(before, after, {}, ("soundness",))
+    assert snd.verified and snd.mapping.source["x"] == "lookup-only root"

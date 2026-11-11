@@ -8,6 +8,11 @@ Sources, in priority order:
                      term found by search
   5. lookup-only   - soundness only: a constant for a column that only lookups
                      mention: 0, else the root of a lookup argument
+  6. zero          - soundness only: 0 for a group the witness search could
+                     not map, kept if PolySolver then proves its constraints
+
+In soundness a derived recipe PolySolver cannot read (IfEqZero, QuotientOrZero)
+is skipped, so the column goes on to sources 3 to 6.
 
 Any mapping is sound: a poor choice can only make an obligation unprovable,
 never prove a wrong pass (``flip_quant``). So the heuristics here are free to
@@ -21,6 +26,8 @@ from dataclasses import dataclass, field
 from src.polysolver import (
     Defs,
     Expr,
+    Implied,
+    InvalidDefs,
     Opaque,
     PolySolver,
     find_uniform_witness,
@@ -48,7 +55,8 @@ class Mapping:
 
     # Candidate-only column -> its term over reference columns.
     defs: dict[str, Expr | Opaque] = field(default_factory=dict)
-    # Column -> which source defined it ("derived", "substitution", "witness").
+    # Column -> which source defined it: "derived", "substitution", "witness",
+    # "zero witness", "lookup-only zero" or "lookup-only root".
     source: dict[str, str] = field(default_factory=dict)
     # Columns no source could define; their obligations stay undecided.
     unmapped: set[str] = field(default_factory=set)
@@ -85,7 +93,8 @@ def soundness_mapping(
     left = [
         col
         for col in _needed(before, after)
-        if not _from_derived(m, col, before) and not _from_subs(m, col, subs, after)
+        if not _from_derived(m, col, before, skip_opaque=True)
+        and not _from_subs(m, col, subs, after)
     ]
     # A column used only by lookups (no constraint mentions it) has nothing for
     # the witness search to check against. Typically it is a free column whose
@@ -117,6 +126,11 @@ def soundness_mapping(
         #     # Fallback: one After column for all of them (e.g. a renamed column).
         #     r = find_uniform_witness(solver, m.defs, group, targets, shortlist)
         #     w = None if r is None else dict.fromkeys(group, r)
+        source = "witness"
+        if w is None:
+            # Last: 0 for every column, e.g. markers whose only constraint is
+            # booleanity (their recipe is an IfEqZero we do not read).
+            w, source = _zero_witness(solver, m.defs, group, targets), "zero witness"
         if w is None:
             m.unmapped |= group  # reported, never guessed
             for col in group:
@@ -124,7 +138,7 @@ def soundness_mapping(
             continue
         m.defs.update(w)
         for col in group:
-            m.source[col] = "witness"
+            m.source[col] = source
         # Report one entry per distinct term: in the linear case all inv_i share
         # f (one entry), in the squared case each has its own f * x_i.
         shared: dict[str, tuple[list[str], Expr]] = {}  # repr(term) -> (columns, term)
@@ -194,12 +208,37 @@ def _constraint_columns(c: Circuit) -> set[str]:
     )
 
 
-def _from_derived(m: Mapping, col: str, cand: Circuit) -> bool:
-    """Define ``col`` by its ``derived_columns`` recipe, if it has one."""
+def _zero_witness(
+    solver: PolySolver, base_w: dict, group: set[str], targets: list[Expr]
+) -> dict[str, Expr] | None:
+    """0 for every column of ``group``, if PolySolver then proves every target; else None."""
+    w = dict.fromkeys(group, 0)
+    try:
+        defs = solver.make_defs({**base_w, **w})
+    except InvalidDefs:
+        return None
+    if all(isinstance(solver.implies(t, defs), Implied) for t in targets):
+        return w
+    return None
+
+
+def _from_derived(m: Mapping, col: str, cand: Circuit, skip_opaque: bool = False) -> bool:
+    """Define ``col`` by its ``derived_columns`` recipe, if it has one.
+
+    ``skip_opaque`` (soundness) ignores the recipes PolySolver cannot read.
+    There the witness is ours to choose, and an opaque one proves nothing, so
+    the column goes on to the other sources: a constant for a lookup-only
+    column, the witness search, then 0. Completeness keeps the recipe: it is
+    what After's prover runs.
+    """
     recipes = cand.derived.get(col)
     if not recipes:
         return False
     defs = [_recipe_def(r) for r in recipes]
+    if skip_opaque:
+        defs = [d for d in defs if not isinstance(d, Opaque)]
+        if not defs:
+            return False
     m.defs[col], m.source[col] = defs[0], "derived"
     m.extra += [(col, d) for d in defs[1:]]  # pick one; the rest become obligations
     return True
