@@ -6,6 +6,8 @@ Sources, in priority order:
   3. substitution  - ``_substitutions.json``, composed down to reference columns
   4. witness       - soundness only: read off a merged constraint, or one shared
                      term found by search
+  5. lookup-only   - soundness only: a constant for a column that only lookups
+                     mention: 0, else the root of a lookup argument
 
 Any mapping is sound: a poor choice can only make an obligation unprovable,
 never prove a wrong pass (``flip_quant``). So the heuristics here are free to
@@ -17,6 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from src.polysolver import (
+    Defs,
     Expr,
     Opaque,
     PolySolver,
@@ -26,12 +29,13 @@ from src.polysolver import (
 )
 
 from .circuit import (
+    STATELESS_BUSES,
     Circuit,
     interaction_columns,
     recipe_columns,
     substitute,
 )
-from .tables import VARIABLE_RANGE_CHECKER
+from .tables import bound, lookup_holds
 
 
 class MissingDefinition(Exception):
@@ -85,22 +89,22 @@ def soundness_mapping(
     ]
     # A column used only by lookups (no constraint mentions it) has nothing for
     # the witness search to check against. Typically it is a free column whose
-    # range check the pass dropped. Its value is ours to choose: if every
-    # interaction that mentions it is a range check [col, bits] of the bare
-    # column with a constant width, pick 0, a row of every width, and the sweep
-    # evaluates those lookups. Otherwise (an expression argument, another bus,
-    # a stateful interaction) 0 may be wrong, so leave it unmapped as before.
-    in_constraints = _constraint_columns(before) # all candidate columns in algebraic constraints
+    # range check the pass dropped. Its value is ours to choose, so propose
+    # constants (_lookup_only_value) and keep the first one under which every
+    # lookup that mentions the column holds outright.
+    in_constraints = _constraint_columns(before)  # all candidate columns in algebraic constraints
     lookup_only = [col for col in left if col not in in_constraints]
     interactions = _interactions_by_column(before, lookup_only)
-    for col in left:
-        if col in in_constraints:
-            continue
-        if _only_range_checked(col, interactions[col]):
-            m.defs[col], m.source[col] = 0, "lookup-only zero"
-        else:
+    defs = solver.make_defs(m.defs) if lookup_only else None
+    for col in lookup_only:
+        found = _lookup_only_value(col, interactions[col], solver, defs)
+        if found is None:
             m.unmapped.add(col)
             m.unmapped_reason[col] = "lookup-only"
+            continue
+        value, defs = found
+        m.defs[col] = value
+        m.source[col] = "lookup-only zero" if value == 0 else "lookup-only root"
     left = [col for col in left if col in in_constraints]
     # What is left was merged away with no hint (e.g. the is-zero inverse
     # markers). Each group of such columns gets its own witness.
@@ -141,21 +145,36 @@ def _interactions_by_column(c: Circuit, cols: list[str]) -> dict[str, list[dict]
     return out
 
 
-def _only_range_checked(col: str, interactions: list[dict]) -> bool:
-    """Every interaction that mentions ``col`` is [col, constant] on the range checker."""
-    seen = False
+def _lookup_only_value(
+    col: str, interactions: list[dict], solver: PolySolver, defs: Defs
+) -> tuple[int, Defs] | None:
+    """A constant for the lookup-only column ``col``, with ``defs`` extended by it, or None.
+
+    Candidates, in order: 0, then for each lookup argument that mentions the
+    column the value that makes that argument 0 (PolySolver.linear_root),
+    tightest table bound first (tables.bound). 0 is a row of every range
+    table, so meeting the tightest check exactly leaves the slack to the wider
+    ones: in the timestamp gadget [low, 17], [(gap - low) / 2^17, 12] the root
+    low = gap is the honest split. The first candidate under which every
+    lookup holds (tables.lookup_holds) is kept. The order is a heuristic; the
+    sweep evaluates every lookup again. A stateful use declines: its value is
+    not ours to choose from the tables alone.
+    """
+    if not interactions or any(bi["id"] not in STATELESS_BUSES for bi in interactions):
+        return None
+    roots = []
     for bi in interactions:
-        args = bi["args"]
-        if not (
-            bi["id"] == VARIABLE_RANGE_CHECKER
-            and len(args) == 2
-            and args[0] == col
-            and isinstance(args[1], int)
-            and col not in variables(bi["mult"])
-        ):
-            return False
-        seen = True
-    return seen
+        for k, arg in enumerate(bi["args"]):
+            if col in variables(arg):
+                root = solver.linear_root(arg, col, defs)
+                if root is not None:
+                    b = bound(bi, k)
+                    roots.append((b is None, b or 0, root))
+    for value in dict.fromkeys([0, *(r for _, _, r in sorted(roots))]):
+        extended = solver.extend_defs(defs, col, value)
+        if all(lookup_holds(solver, bi, extended) for bi in interactions):
+            return value, extended
+    return None
 
 
 def _needed(cand: Circuit, ref: Circuit) -> list[str]:

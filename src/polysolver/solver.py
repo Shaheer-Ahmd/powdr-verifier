@@ -583,6 +583,22 @@ class PolySolver:
                 polys[v] = None  # queries through v report the limit
         return Defs(polys, frozenset(opaque), id(self.table))
 
+    def extend_defs(self, defs: Defs, name: str, rhs: Expr | Opaque) -> Defs:
+        """``defs`` with ``name := rhs`` added (or replaced), validated like make_defs.
+
+        Only the new right-hand side is expanded, so a caller trying several
+        values for one variable does not pay for the rest each time.
+        """
+        one = self.make_defs({name: rhs})
+        if defs is NO_DEFS:
+            return one
+        if defs.owner != id(self.table):
+            raise ValueError("defs were made by a solver with another table")
+        v = self._var(name)
+        polys = {x: t for x, t in defs.polys.items() if x != v}
+        polys.update(one.polys)
+        return Defs(polys, (defs.opaque - {v}) | one.opaque, defs.owner)
+
     # ------------------------------------------------------------ query
 
     def implies(self, q: Expr, defs: Defs = NO_DEFS) -> Verdict:
@@ -655,6 +671,30 @@ class PolySolver:
             return tuple(sorted(P.expand(e, self._expander(defs), self.p, self.max_terms).items()))
         except P.ExpansionLimit:
             return None
+
+    def linear_root(self, e: Expr, x: str, defs: Defs = NO_DEFS) -> int | None:
+        """The value of ``x`` that makes ``e`` zero, if ``e`` reads a*x + c with a != 0.
+
+        ``e`` is read under the Defs and the solved equations, with ``x`` a
+        plain variable; a and c must be constants. For proposing candidates
+        only, like normal_form: a caller that uses the value must still have
+        it checked.
+        """
+        nf = self.normal_form(e, defs, free=[x])
+        if nf is None:
+            return None
+        lin = ((self._var(x), 1),)
+        a = c = 0
+        for m, k in nf:
+            if m == ():
+                c = k
+            elif m == lin:
+                a = k
+            else:
+                return None
+        if not a:
+            return None
+        return -c * pow(a, self.p - 2, self.p) % self.p
 
     def premises_mentioning(self, name: str) -> list[Expr]:
         """The premises, as written, that mention the variable ``name``.

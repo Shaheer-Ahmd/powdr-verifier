@@ -51,7 +51,7 @@ from src.polysolver import (
 from .adapter import HINT_TAG
 from .circuit import Circuit, interaction_columns, substitute, substitute_interaction
 from .mapping import Mapping
-from .tables import is_row
+from .tables import constant, is_row, normal_key
 
 PC_LOOKUP = 2  # its table is the program: never evaluated (not trusted)
 
@@ -257,7 +257,7 @@ def sweep(
     # form under the solved equations. It only proposes a J; implies_equal decides.
     ref_index: dict = {}
     for j, r in enumerate(ref.stateless):
-        k = _normal_key(solver, r)
+        k = normal_key(solver, r)
         if k is not None:
             ref_index.setdefault(k, (j, r))
 
@@ -374,26 +374,6 @@ def hint_form(t: Expr) -> str:
     return "y + c" if () in t else "y"
 
 
-def _normal_key(solver: PolySolver, bi: dict, defs=None) -> tuple | None:
-    """(bus, mult, args) in PolySolver's normal form, for the untrusted index."""
-    nf = [
-        solver.normal_form(e, defs) if defs is not None else solver.normal_form(e)
-        for e in [bi["mult"], *bi["args"]]
-    ]
-    if any(x is None for x in nf):
-        return None
-    return (bi["id"], nf[0], tuple(nf[1:]))
-
-
-def _constant(nf: tuple) -> int | None:
-    """The value of a normal form with no variables, else None."""
-    if not nf:
-        return 0
-    if len(nf) == 1 and nf[0][0] == ():
-        return nf[0][1]
-    return None
-
-
 def _by_tables_or_congruence(
     name: str,
     bi: dict,
@@ -404,13 +384,13 @@ def _by_tables_or_congruence(
     mapped: bool,
 ) -> Obligation | None:
     """The evaluated and congruence rungs for one lookup; None if neither applies."""
-    key = _normal_key(solver, bi, defs)
+    key = normal_key(solver, bi, defs)
     if key is None:
         return None
     bus, _, args = key
-    values = [_constant(a) for a in args]
-    constant = all(v is not None for v in values)
-    if constant and bus != PC_LOOKUP:
+    values = [constant(a) for a in args]
+    ground = all(v is not None for v in values)
+    if ground and bus != PC_LOOKUP:
         # Rung 3: constant arguments. Decide by the table, whatever the mult is:
         # a row makes "mult != 0 => row" true outright. PcLookup is never
         # evaluated (its table is the program); congruence below needs no table.
@@ -425,7 +405,7 @@ def _by_tables_or_congruence(
             )
     # Rung 4: congruence with a reference lookup J proposed by the index.
     ob = _congruence(name, bi, defs, solver, ref, ref_index.get(key), mapped)
-    if ob is None and constant and bus == PC_LOOKUP:
+    if ob is None and ground and bus == PC_LOOKUP:
         return Obligation(
             name, "undecided", "pc_lookup", reason="bus: pc_lookup not trusted",
             via_mapping=mapped, kind="bus",
