@@ -125,12 +125,30 @@ def byte_ranges(c: Circuit, p: int = BABYBEAR) -> list[tuple[str, int, int]]:
     """
     out: dict[str, tuple[str, int, int]] = {}
     for bi in c.bus_interactions:
-        if bi["id"] == MEMORY_BUS and bi["mult"] == p - 1:
+        # Dumps spell -1 both as p - 1 and as ["-", 1].
+        if bi["id"] == MEMORY_BUS and _const_value(bi["mult"], p) == p - 1:
             # args are [address_space, pointer, data..., timestamp]
             for limb in bi["args"][2:-1]:
                 if isinstance(limb, str):
                     out[limb] = (limb, 0, 255)
     return list(out.values())
+
+
+def _const_value(e: Expr, p: int) -> int | None:
+    """The value in [0, p) of an expression with no variables, else None."""
+    if isinstance(e, bool):
+        return None
+    if isinstance(e, int):
+        return e % p
+    if isinstance(e, list) and len(e) == 2 and e[0] == "-":
+        v = _const_value(e[1], p)
+        return None if v is None else -v % p
+    if isinstance(e, list) and len(e) == 3:
+        a, b = _const_value(e[0], p), _const_value(e[2], p)
+        if a is None or b is None:
+            return None
+        return {"+": a + b, "-": a - b, "*": a * b}[e[1]] % p
+    return None
 
 
 def lookup_ranges(c: Circuit, p: int = BABYBEAR) -> list[tuple[str, int, int]]:
@@ -150,7 +168,7 @@ def lookup_ranges(c: Circuit, p: int = BABYBEAR) -> list[tuple[str, int, int]]:
 
     for bi in c.bus_interactions:
         mult, args = bi["mult"], bi["args"]
-        if isinstance(mult, bool) or not isinstance(mult, int) or mult % p == 0:
+        if not _const_value(mult, p):  # gated (symbolic) or 0
             continue
         if bi["id"] == VARIABLE_RANGE_CHECKER and len(args) == 2:
             bits = args[1]
