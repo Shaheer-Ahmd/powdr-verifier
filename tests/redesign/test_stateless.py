@@ -117,7 +117,8 @@ def _first_lookup(machine, bus):
 def test_changed_lookup_arg_is_caught(is_zero_dumps):
     def edit(after):
         vrc = _first_lookup(after, 3)  # VariableRangeChecker [x, bits]
-        vrc["args"][1] = vrc["args"][1] + 1  # check a different bit width
+        # A narrower width: not implied. (A wider one is, by table semantics.)
+        vrc["args"][1] = vrc["args"][1] - 1
 
     cmp = _completeness_with(is_zero_dumps, edit)
     stuck = bus_obligations(cmp, "undecided")

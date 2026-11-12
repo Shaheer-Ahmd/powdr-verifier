@@ -752,6 +752,45 @@ class PolySolver:
             return None
         return -c * pow(a, self.p - 2, self.p) % self.p
 
+    def interval(
+        self, e: Expr, defs: Defs = NO_DEFS
+    ) -> tuple[int, int, tuple[str, ...]] | None:
+        """(lo, hi, ranged variables) with 0 <= lo <= e's representative <= hi < p, or None.
+
+        ``e`` is read under the Defs and the solved equations. It must then be
+        affine, c + sum w_i * x_i, with every x_i ranged. Reading each w_i and
+        c as a signed integer, the integer sum lies in [lo, hi]; if that is
+        within [0, p), the sum does not wrap, so it is e's representative.
+        """
+        nf = self.normal_form(e, defs)
+        if nf is None:
+            return None
+        p = self.p
+
+        def signed(c: int) -> int:
+            return c - p if c > p // 2 else c
+
+        lo = hi = 0
+        used = []
+        for m, k in nf:
+            k = signed(k)
+            if m == ():
+                lo += k
+                hi += k
+                continue
+            if len(m) != 1 or m[0][1] != 1:
+                return None  # not affine
+            v = m[0][0]
+            d = self._domains.get(v)
+            if d is None:
+                return None
+            lo += k * (d.lo if k > 0 else d.hi)
+            hi += k * (d.hi if k > 0 else d.lo)
+            used.append(self.table.name(v))
+        if lo < 0 or hi >= p:
+            return None
+        return lo, hi, tuple(used)
+
     def premises_mentioning(self, name: str) -> list[Expr]:
         """The premises, as written, that mention the variable ``name``.
 

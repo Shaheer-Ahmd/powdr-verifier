@@ -18,6 +18,10 @@ from src.polysolver import Defs, PolySolver
 PC_LOOKUP = 2  # [pc, opcode, a, ..., g]: the program's instruction at pc
 VARIABLE_RANGE_CHECKER = 3  # [x, bits]: x < 2^bits
 BITWISE_LOOKUP = 6  # [x, y, z, op]: op 0 range-checks x, y; op 1 has z = x xor y
+TUPLE_RANGE_CHECKER = 7  # [x, y]: x < TUPLE_SIZES[0], y < TUPLE_SIZES[1]
+# The rv32im default sizes (openvm default_range_tuple_checker_sizes), as in
+# openvm_tuple_range_checker.py. Other extensions (bigint) configure others.
+TUPLE_SIZES = (1 << 8, 8 * (1 << 8))
 # Widest width the range checker is instantiated for
 # (openvm_variable_range_checker.py MAX_BITS); wider is not decided here.
 MAX_BITS = 25
@@ -40,6 +44,8 @@ def is_row(
         if bits > MAX_BITS:
             return None
         return x < 2**bits
+    if bus == TUPLE_RANGE_CHECKER and len(args) == 2:
+        return args[0] < TUPLE_SIZES[0] and args[1] < TUPLE_SIZES[1]
     if bus == BITWISE_LOOKUP and len(args) == 4:
         x, y, z, op = args
         if op == 0:
@@ -48,6 +54,61 @@ def is_row(
             return x < 256 and y < 256 and z == x ^ y
         return False
     return None
+
+
+def _is_const(e, value: int | None = None, p: int = 2013265921) -> bool:
+    if isinstance(e, bool) or not isinstance(e, int):
+        return False
+    return value is None or e % p == value
+
+
+def lookup_facts(bi: dict, p: int = 2013265921, is_bit=None) -> list:
+    """Polynomial facts that a reference lookup gives, as expressions e (e = 0).
+
+    The lookup asserts "mult != 0 => args is a row". For an identity id that
+    every row satisfies, mult * id = 0 follows (and id = 0 if mult is a
+    nonzero constant). The identities read the tuple as written (M4i):
+
+      bitwise [x, y, z, 1] (z = x xor y, x and y bytes):
+        y = 0: z = x;  x = 0: z = y;  y = 255: z = 255 - x;  x = 255: z = 255 - y;
+        z = 0: x = y;  x and y the same expression: z = 0
+        x and y bits (is_bit, the caller's ranges): z = x + y - 2xy
+      bitwise [x, y, z, 0]: z = 0
+      range checker [x, 0]: x = 0;  [x, 1]: x * (x - 1) = 0
+    """
+    mult, args = bi["mult"], bi["args"]
+    if _is_const(mult, 0, p):
+        return []
+    ids = []
+    if bi["id"] == BITWISE_LOOKUP and len(args) == 4:
+        x, y, z, op = args
+        if _is_const(op, 1, p):
+            if _is_const(y, 0, p):
+                ids.append([z, "-", x])
+            elif _is_const(x, 0, p):
+                ids.append([z, "-", y])
+            elif _is_const(y, 255, p):
+                ids.append([[z, "+", x], "-", 255])
+            elif _is_const(x, 255, p):
+                ids.append([[z, "+", y], "-", 255])
+            elif is_bit is not None and is_bit(x) and is_bit(y):
+                ids.append([z, "-", [[x, "+", y], "-", [2, "*", [x, "*", y]]]])
+            if _is_const(z, 0, p):
+                ids.append([x, "-", y])
+            elif x == y:
+                ids.append(z)
+        elif _is_const(op, 0, p) and not _is_const(z, 0, p):
+            ids.append(z)
+    elif bi["id"] == VARIABLE_RANGE_CHECKER and len(args) == 2:
+        x, bits = args
+        if _is_const(bits, 0, p):
+            ids.append(x)
+        elif _is_const(bits, 1, p):
+            ids.append([x, "*", [x, "-", 1]])
+    ids = [e for e in ids if not isinstance(e, int)]  # constants: nothing to learn
+    if isinstance(mult, int) and not isinstance(mult, bool):
+        return ids
+    return [[mult, "*", e] for e in ids]
 
 
 def bound(bi: dict, k: int) -> int | None:
@@ -60,6 +121,8 @@ def bound(bi: dict, k: int) -> int | None:
         bits = args[1]
         if k == 0 and isinstance(bits, int) and not isinstance(bits, bool) and 0 <= bits <= MAX_BITS:
             return 2**bits
+    if bi["id"] == TUPLE_RANGE_CHECKER and len(args) == 2 and k in (0, 1):
+        return TUPLE_SIZES[k]
     if bi["id"] == BITWISE_LOOKUP and len(args) == 4 and k in (0, 1):
         return 256
     return None

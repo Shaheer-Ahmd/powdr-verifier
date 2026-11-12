@@ -27,6 +27,12 @@ table", where the table is an uninterpreted predicate. Its obligation I[w]:
                congruence, J's fact gives I's. J is proposed by an index on
                PolySolver's normal forms (untrusted search); only the
                implies_equal verdicts decide
+  table-semantics - the table's meaning, read off the args (M4i): a range
+               check [x, bits], tuple range check [x, y] or bitwise
+               [x, y, z, op] whose args have ranges inside the table's
+               (PolySolver.interval), and z proved to be 0 (op 0) or x xor y
+               (op 1) when y or x is 0 or 255, x and y are bits (x + y - 2xy),
+               or x = y. Holds whatever the multiplicity is
 
 Results are cached by canonical key. A direction is verified only if no
 obligation is undecided. Stateful buses (memory, execution bridge) are not
@@ -56,7 +62,17 @@ from src.polysolver import (
 from .adapter import HINT_TAG
 from .circuit import Circuit, interaction_columns, substitute, substitute_interaction
 from .mapping import Mapping
-from .tables import PC_LOOKUP, constant, is_row, normal_key
+from .tables import (
+    BITWISE_LOOKUP,
+    MAX_BITS,
+    PC_LOOKUP,
+    TUPLE_RANGE_CHECKER,
+    TUPLE_SIZES,
+    VARIABLE_RANGE_CHECKER,
+    constant,
+    is_row,
+    normal_key,
+)
 
 # Rungs that prove an obligation; anything else is "undecided".
 DISCHARGED = (
@@ -69,6 +85,7 @@ DISCHARGED = (
     "evaluated",
     "evaluated-program",
     "congruence",
+    "table-semantics",
 )
 
 
@@ -188,6 +205,7 @@ def sweep(
     solver: PolySolver,
     hints: list[tuple[str, Expr]] = (),
     program: dict[int, tuple[int, ...]] | None = None,
+    table_rung: bool = True,
 ) -> Report:
     """Check every candidate constraint against the reference under ``mapping``.
 
@@ -316,6 +334,8 @@ def sweep(
             ob = _by_tables_or_congruence(
                 name, bi, defs, solver, ref, ref_index, mapped, program
             )
+            if ob is None and table_rung:
+                ob = _by_table_semantics(name, bi, defs, solver, mapped)
             if ob is None:
                 same_mult = (bw["id"], mult) in ref_bus_mults
                 reason = (
@@ -442,6 +462,75 @@ def _by_tables_or_congruence(
             via_mapping=mapped, kind="bus",
         )
     return ob
+
+
+def _by_table_semantics(name, bi, defs, solver: PolySolver, mapped) -> Obligation | None:
+    """Rung 5: the args form a row for every witness, by the table's meaning.
+
+    Var range [x, bits]: bits is a constant <= MAX_BITS and x's interval is
+    below 2^bits, or (bits 0 or 1) x = 0 or x * (x - 1) = 0 is implied. Bitwise [x, y, z, op]: x and y have intervals within
+    [0, 255]; op 0 needs z = 0, op 1 needs z = x xor y, proved by
+    implies_equal in the cases y or x = 0 (z = the other), y or x = 255
+    (z = 255 - the other, exact on bytes) or x = y (z = 0). None otherwise.
+    """
+    bus, args = bi["id"], bi["args"]
+    used: list[str] = []
+
+    def within(e, hi: int) -> bool:
+        iv = solver.interval(e, defs)
+        if iv is None or iv[1] > hi:
+            return False
+        used.extend(f"range {v}" for v in iv[2])
+        return True
+
+    def proved(v) -> bool:
+        if not isinstance(v, Implied):
+            return False
+        used.extend(v.premises)
+        used.extend(f"solved {t}" for t in v.solved)
+        return True
+
+    def value(e) -> int | None:
+        nf = solver.normal_form(e, defs)
+        return None if nf is None else constant(nf)
+
+    ok = False
+    if bus == VARIABLE_RANGE_CHECKER and len(args) == 2:
+        bits = value(args[1])
+        x = args[0]
+        ok = bits is not None and bits <= MAX_BITS and (
+            within(x, 2**bits - 1)
+            # A composite x has no interval of its own, but the reference may
+            # state the row directly: x = 0, or x * (x - 1) = 0 (as
+            # range_constraints writes a dropped [x, 1]).
+            or (bits == 0 and proved(solver.implies(x, defs)))
+            or (bits == 1 and proved(solver.implies([x, "*", [x, "-", 1]], defs)))
+        )
+    elif bus == TUPLE_RANGE_CHECKER and len(args) == 2:
+        ok = within(args[0], TUPLE_SIZES[0] - 1) and within(args[1], TUPLE_SIZES[1] - 1)
+    elif bus == BITWISE_LOOKUP and len(args) == 4:
+        x, y, z, op = args
+        op = value(op)
+        if op in (0, 1) and within(x, 255) and within(y, 255):
+            if op == 0:
+                ok = proved(solver.implies(z, defs))
+            else:
+                cx, cy = value(x), value(y)
+                if cx is not None and cy is not None:
+                    ok = proved(solver.implies_equal(z, cx ^ cy, defs))
+                elif cy in (0, 255) or cx in (0, 255):
+                    other, c = (x, cy) if cy in (0, 255) else (y, cx)
+                    target = other if c == 0 else [255, "-", other]
+                    ok = proved(solver.implies_equal(z, target, defs))
+                elif within(x, 1) and within(y, 1):  # bits: xor is x + y - 2xy
+                    xor = [[x, "+", y], "-", [2, "*", [x, "*", y]]]
+                    ok = proved(solver.implies_equal(z, xor, defs))
+                elif proved(solver.implies_equal(x, y, defs)):
+                    ok = proved(solver.implies(z, defs))
+    if not ok:
+        return None
+    detail = ", ".join(dict.fromkeys(used))
+    return Obligation(name, "table-semantics", detail, via_mapping=mapped, kind="bus")
 
 
 def _congruence(name, bi, defs, solver, ref, found, mapped) -> Obligation | None:

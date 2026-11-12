@@ -5,6 +5,7 @@ from __future__ import annotations
 from src.polysolver import Expr, PolySolver, VarTable
 
 from .circuit import Circuit, byte_ranges, lookup_ranges
+from .tables import lookup_facts
 
 HINT_TAG = "hint:"  # tag prefix of powdr's substitutions, in verdicts and solved_log
 
@@ -19,6 +20,7 @@ def reference_solver(
     case_split: bool = True,
     nowrap_pins: bool = True,
     use_lookup_ranges: bool = True,
+    use_lookup_facts: bool = True,
 ) -> PolySolver:
     """Premises and ranges from the reference side only (the polarity rule).
 
@@ -37,6 +39,9 @@ def reference_solver(
     ``use_lookup_ranges`` also takes ranges from the reference's own range
     and bitwise lookups with a constant nonzero multiplicity: such a lookup
     is part of the reference circuit, so it holds for every witness.
+    ``use_lookup_facts`` adds the polynomial identities of the reference's
+    bitwise and range lookups (tables.lookup_facts, M4i), gated by their
+    multiplicity, as premises.
     """
     s = PolySolver(
         table,
@@ -54,6 +59,15 @@ def reference_solver(
     if use_lookup_ranges:
         for x, lo, hi in lookup_ranges(ref):
             s.add_range(x, lo, hi, tag=f"{ref.label}:lookup:{x}")
+    if use_lookup_facts:
+
+        def is_bit(e: Expr) -> bool:  # by the ranges and premises so far
+            iv = s.interval(e)
+            return iv is not None and iv[1] <= 1
+
+        for j, bi in enumerate(ref.stateless):
+            for k, e in enumerate(lookup_facts(bi, s.p, is_bit)):
+                s.add_premise(e, tag=f"{ref.label}:b{j}:fact{k}")
     s.propagate()
     if hints:
         s.add_solved_all([(x, t, f"{HINT_TAG}{x}") for x, t in hints])

@@ -42,6 +42,8 @@ def check_step(
     program: dict[int, tuple[int, ...]] | None = None,
     use_nowrap_pins: bool = True,
     use_lookup_ranges: bool = True,
+    use_lookup_facts: bool = True,
+    use_table_rung: bool = True,
 ) -> list[Report]:
     """Completeness: Before is the reference. Soundness: After is.
 
@@ -58,9 +60,10 @@ def check_step(
             table, before, use_ranges, hints, use_constants, use_one_hot, use_case_split,
             use_nowrap_pins,
             use_lookup_ranges,
+            use_lookup_facts,
         )
         m = completeness_mapping(before, after, subs)
-        reports.append(sweep("completeness", before, after, m, solver, hints, program))
+        reports.append(sweep("completeness", before, after, m, solver, hints, program, use_table_rung))
     if "soundness" in directions:
         solver = reference_solver(
             table,
@@ -71,9 +74,10 @@ def check_step(
             case_split=use_case_split,
             nowrap_pins=use_nowrap_pins,
             use_lookup_ranges=use_lookup_ranges,
+            use_lookup_facts=use_lookup_facts,
         )
         m = soundness_mapping(after, before, subs, solver) # <- Polysolver used to find missing witnesses
-        reports.append(sweep("soundness", after, before, m, solver, program=program))
+        reports.append(sweep("soundness", after, before, m, solver, program=program, table_rung=use_table_rung))
     return reports
 
 
@@ -92,6 +96,8 @@ def check(
     trust_program: bool = True,
     use_nowrap_pins: bool = True,
     use_lookup_ranges: bool = True,
+    use_lookup_facts: bool = True,
+    use_table_rung: bool = True,
 ) -> list[Report]:
     before = load_step(group, block, step_from, root)
     after = load_step(group, block, step_to, root)
@@ -109,4 +115,6 @@ def check(
         load_program(group, block, root) if trust_program else None,
         use_nowrap_pins,
         use_lookup_ranges,
+        use_lookup_facts,
+        use_table_rung,
     )
