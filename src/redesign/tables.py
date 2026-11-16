@@ -8,7 +8,9 @@ the SMT encoders in src/bus_interactions/.
 PcLookup (bus 2) has no fixed table: its table is the program. It is
 evaluated only against a ``program`` the caller passes (the block's own
 instructions from the unopt dump, circuit.load_program), which is a trust
-decision the sweep reports under its own rung. Unknown buses are not evaluated.
+decision the sweep reports under its own rung. The same program gives the
+reference side premises (program_facts, switch program_facts). Unknown buses
+are not evaluated.
 """
 
 from __future__ import annotations
@@ -109,6 +111,29 @@ def lookup_facts(bi: dict, p: int = 2013265921, is_bit=None) -> list:
     if isinstance(mult, int) and not isinstance(mult, bool):
         return ids
     return [[mult, "*", e] for e in ids]
+
+
+def program_facts(
+    bi: dict, pc: int, program: dict[int, tuple[int, ...]], mult_value: int | None = None
+) -> list:
+    """Facts a reference PcLookup gives once its pc is known to be the constant ``pc``.
+
+    The lookup asserts "mult != 0 => args is a row of the program", and the
+    program has one row per pc, so mult * (args[k] - row[k]) = 0 for every
+    argument after the pc. ``mult_value`` is the multiplicity's value if the
+    caller knows it is a constant (under the solved equations): nonzero gives
+    args[k] - row[k] itself, 0 nothing. Nothing for a pc ``program`` does not
+    cover, or an instruction of another length.
+    """
+    if bi["id"] != PC_LOOKUP or pc not in program:
+        return []
+    row, args = program[pc], bi["args"][1:]
+    if len(row) != len(args) or mult_value == 0:
+        return []
+    ids = [[a, "-", r] for a, r in zip(args, row) if not _is_const(a)]
+    if mult_value is not None:
+        return ids
+    return [[bi["mult"], "*", e] for e in ids]
 
 
 def bound(bi: dict, k: int) -> int | None:

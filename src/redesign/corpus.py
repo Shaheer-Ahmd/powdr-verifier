@@ -18,7 +18,7 @@ from src.lens.resolve import ResolveError, group_dir, index_block, list_blocks
 from src.paths import POWDR_DUMPS_DIR, VERIFIER_DIR
 
 from .check import DIRECTIONS, check_step
-from .circuit import Circuit, load_program, load_substitutions
+from .circuit import Circuit, load_entry_pc, load_program, load_substitutions
 from .mapping import MissingDefinition
 from .sweep import Report
 
@@ -42,6 +42,8 @@ def run_sweep(
     use_lookup_ranges: bool = True,
     use_lookup_facts: bool = True,
     use_table_rung: bool = True,
+    trust_execution: bool = True,
+    use_program_facts: bool = True,
     passes: Iterable[str] = (),
     on_pair: Callable[[list[dict], list[Report | None], Circuit, Circuit], None]
     | None = None,
@@ -69,6 +71,7 @@ def run_sweep(
     for block, entries in indexed.items():
         subs = load_substitutions(group, block, root)
         program = load_program(group, block, root) if trust_program else None
+        entry_pc = load_entry_pc(group, block, root)
         circuits: dict[int, Circuit] = {}  # loaded on first use
         records = []
         for i in range(len(entries) - 1):
@@ -103,6 +106,9 @@ def run_sweep(
                     use_lookup_ranges,
                     use_lookup_facts,
                     use_table_rung,
+                    entry_pc,
+                    trust_execution,
+                    use_program_facts,
                 )
             except MissingDefinition as exc:
                 # Only completeness raises; still record soundness separately.
@@ -123,6 +129,9 @@ def run_sweep(
                         use_lookup_ranges,
                         use_lookup_facts,
                         use_table_rung,
+                        entry_pc,
+                        trust_execution,
+                        use_program_facts,
                     )
                 pair = [_error(base, "completeness", str(exc))]
                 pair += [_record(base, r) for r in reports[1:]]
@@ -150,6 +159,8 @@ def run_sweep(
         "lookup_ranges": use_lookup_ranges,
         "lookup_facts": use_lookup_facts,
         "table_rung": use_table_rung,
+        "trust_execution": trust_execution,
+        "program_facts": use_program_facts and trust_program,
         "seconds": round(time.monotonic() - start, 1),
         "created": datetime.now().astimezone().isoformat(timespec="seconds"),
         "verifier_commit": _commit(),

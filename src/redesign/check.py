@@ -7,7 +7,7 @@ from pathlib import Path
 from src.polysolver import Expr, VarTable, variables
 
 from .adapter import reference_solver
-from .circuit import Circuit, load_program, load_step, load_substitutions
+from .circuit import Circuit, load_entry_pc, load_program, load_step, load_substitutions
 from .mapping import completeness_mapping, soundness_mapping
 from .sweep import Report, sweep
 
@@ -44,12 +44,24 @@ def check_step(
     use_lookup_ranges: bool = True,
     use_lookup_facts: bool = True,
     use_table_rung: bool = True,
+    entry_pc: int | None = None,
+    trust_execution: bool = True,
+    use_program_facts: bool = True,
 ) -> list[Report]:
     """Completeness: Before is the reference. Soundness: After is.
 
     ``program``: the block's own instructions by pc, trusted as the PcLookup
-    table (see sweep's evaluated-program rung); None evaluates no PcLookup.
+    table (see sweep's evaluated-program rung, and program facts as
+    premises); None evaluates no PcLookup and gives no program facts.
+    ``entry_pc`` and ``trust_execution``: the APC execution assumption
+    (execution.py), on both sides alike.
     """
+    trusted = dict(
+        entry_pc=entry_pc,
+        trust_execution=trust_execution,
+        program=program,
+        use_program_facts=use_program_facts,
+    )
     table = VarTable()  # one per step, shared by both directions
     reports = []
     if "completeness" in directions:
@@ -61,6 +73,7 @@ def check_step(
             use_nowrap_pins,
             use_lookup_ranges,
             use_lookup_facts,
+            **trusted,
         )
         m = completeness_mapping(before, after, subs)
         reports.append(sweep("completeness", before, after, m, solver, hints, program, use_table_rung))
@@ -75,6 +88,7 @@ def check_step(
             nowrap_pins=use_nowrap_pins,
             use_lookup_ranges=use_lookup_ranges,
             use_lookup_facts=use_lookup_facts,
+            **trusted,
         )
         m = soundness_mapping(after, before, subs, solver) # <- Polysolver used to find missing witnesses
         reports.append(sweep("soundness", after, before, m, solver, program=program, table_rung=use_table_rung))
@@ -98,6 +112,8 @@ def check(
     use_lookup_ranges: bool = True,
     use_lookup_facts: bool = True,
     use_table_rung: bool = True,
+    trust_execution: bool = True,
+    use_program_facts: bool = True,
 ) -> list[Report]:
     before = load_step(group, block, step_from, root)
     after = load_step(group, block, step_to, root)
@@ -117,4 +133,7 @@ def check(
         use_lookup_ranges,
         use_lookup_facts,
         use_table_rung,
+        load_entry_pc(group, block, root),
+        trust_execution,
+        use_program_facts,
     )

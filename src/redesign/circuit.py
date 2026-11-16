@@ -88,6 +88,18 @@ def load_program(
     return program_of(load(path), p) if path else {}
 
 
+def load_entry_pc(group: str, block: str, root: Path | None = None) -> int | None:
+    """The pc the APC is entered at: its first basic block's start pc (None if unknown)."""
+    path = base_dump_path(group_dir(group, root or POWDR_DUMPS_DIR), block)
+    return entry_pc_of(load(path)) if path else None
+
+
+def entry_pc_of(dump: dict) -> int | None:
+    block = dump.get("block") if isinstance(dump, dict) else None
+    blocks = (block or {}).get("blocks") or []
+    return blocks[0]["start_pc"] if blocks else None
+
+
 def program_of(dump: dict, p: int = BABYBEAR) -> dict[int, tuple[int, ...]]:
     """pc -> instruction (field elements) for every instruction of the dump's block."""
     out: dict[int, tuple[int, ...]] = {}

@@ -91,6 +91,11 @@ def show(
 
 def _overview(db: SweepDB, run, f: Filters, limit: int) -> list:
     """Every pass in pipeline order, then the steps with most undecided obligations."""
+    return [_passes(db, run, f), _steps(db, run, f, limit)]
+
+
+def _passes(db: SweepDB, run, f: Filters) -> Table:
+    """Per (pass, direction): step outcomes, undecided reasons and hint use."""
     rows = db.passes(run["id"], f)
     undecided: dict[tuple[str, str], Counter] = defaultdict(Counter)
     for r in db.reasons(run["id"], f, by_pass=True):
@@ -124,11 +129,12 @@ def _overview(db: SweepDB, run, f: Filters, limit: int) -> list:
             style="dim" if done else None,
         )
         last = r["pass"]
-    return [t, _steps(db, run, f, limit)]
+    return t
 
 
 def _detail(db: SweepDB, run, f: Filters, limit: int, top: int) -> list:
-    """One pass (or block, or pair): reasons, shapes, hints, and the steps with work left."""
+    """One pass (or block, or pair): passes (unless one is chosen), reasons, shapes, hints,
+    and the steps with work left."""
     t = Table(title="Undecided obligations by reason", title_justify="left", box=box.SIMPLE_HEAD)
     for col in ("direction", "kind", "reason"):
         t.add_column(col)
@@ -141,7 +147,15 @@ def _detail(db: SweepDB, run, f: Filters, limit: int, top: int) -> list:
         )
     if not reasons:
         t = Text("Nothing undecided here.", style="green")
-    return [t, _shapes(db, run, f, top), _hint_summary(db, run, f), _steps(db, run, f, limit)]
+    # A block or pair still spans every pass: show them, unless one pass is chosen.
+    passes = _passes(db, run, f) if f.pass_ is None else None
+    return [
+        passes,
+        t,
+        _shapes(db, run, f, top),
+        _hint_summary(db, run, f),
+        _steps(db, run, f, limit),
+    ]
 
 
 def _obligations(db: SweepDB, run, f: Filters, limit: int, top: int) -> list:

@@ -81,6 +81,17 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="do not discharge lookups by table semantics (ranges, xor identities; M4i)",
     )
+    c.add_argument(
+        "--no-trust-execution",
+        action="store_true",
+        help="drop the APC execution assumption (entry pc, every instruction runs,"
+        " execution-bus send = next receive)",
+    )
+    c.add_argument(
+        "--no-program-facts",
+        action="store_true",
+        help="add no premises from the program row at a PcLookup's constant pc",
+    )
     c.add_argument("--root", type=Path, help="dump root (default: powdr-dumps)")
     c.add_argument("--json", action="store_true", help="machine-readable output")
     c.add_argument("-v", "--verbose", action="store_true", help="list every obligation")
@@ -137,6 +148,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="do not discharge lookups by table semantics (ranges, xor identities; M4i)",
     )
     s.add_argument(
+        "--no-trust-execution",
+        action="store_true",
+        help="drop the APC execution assumption (entry pc, every instruction runs,"
+        " execution-bus send = next receive)",
+    )
+    s.add_argument(
+        "--no-program-facts",
+        action="store_true",
+        help="add no premises from the program row at a PcLookup's constant pc",
+    )
+    s.add_argument(
         "--pass",
         dest="passes",
         action="append",
@@ -165,7 +187,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "show",
         help="one run: by pass and step; narrow with the filters",
         description="Without filters: every pass, then the steps with most undecided"
-        " obligations. --pass/--block: reasons, shapes, hints and steps there."
+        " obligations. --pass/--block: reasons, shapes, hints and steps there"
+        " (--block, --pair: every pass too)."
         " --pair: the same for one step of every block (with --block: one step)."
         " --reason/--shape: the obligations themselves. --hints: hint verdicts."
         " --vs BASE: what changed since BASE.",
@@ -315,6 +338,8 @@ def _sweep(args, directions) -> int:
                 use_lookup_ranges=not args.no_lookup_ranges,
                 use_lookup_facts=not args.no_lookup_facts,
                 use_table_rung=not args.no_table_rung,
+                trust_execution=not args.no_trust_execution,
+                use_program_facts=not args.no_program_facts,
                 passes=args.passes,
                 on_pair=record if db else None,
             )
@@ -408,6 +433,8 @@ def main(argv: list[str] | None = None) -> int:
             not args.no_lookup_ranges,
             not args.no_lookup_facts,
             not args.no_table_rung,
+            not args.no_trust_execution,
+            not args.no_program_facts,
         )
     except (ResolveError, FileNotFoundError, MissingDefinition) as exc:
         print(f"redesign: {type(exc).__name__}: {exc}", file=sys.stderr)
