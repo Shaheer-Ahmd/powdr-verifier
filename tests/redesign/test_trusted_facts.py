@@ -1,14 +1,14 @@
 """The APC execution assumption and program facts: trusted premises, each behind a switch."""
 
-from src.polysolver import BABYBEAR, VarTable
-from src.redesign import tables
+from src.polysolver import BABYBEAR, Implied, PolySolver, VarTable
+from src.redesign import lookups
 from src.redesign.adapter import reference_solver
 from src.redesign.check import check_step
 from src.redesign.circuit import Circuit
 from src.redesign.execution import EXECUTION_BRIDGE, chain_pairs, execution_facts
 
 P = BABYBEAR
-PC = tables.PC_LOOKUP
+PC = lookups.PC_LOOKUP
 
 
 def circuit(label, constraints=(), buses=()):
@@ -80,13 +80,25 @@ def test_exec_bus_timestamps_follow_from_the_chain():
 
 
 def test_program_facts_gated_by_mult():
-    bi = {"id": PC, "mult": "m", "args": ["pc", "op", 7]}
+    def facts(program, *premises):
+        s = PolySolver(VarTable(), declared=["pc", "op", "m"])
+        for i, e in enumerate([["pc", "-", 100], *premises]):
+            s.add_premise(e, f"p{i}")
+        s.propagate()
+        lookups.assume(s, "r", [{"id": PC, "mult": "m", "args": ["pc", "op", 7]}],
+                       program=program)
+        return s
+
+    def implied(s, e):
+        return isinstance(s.implies(e), Implied)
+
     program = {100: (529, 7)}
-    assert tables.program_facts(bi, 100, program) == [["m", "*", ["op", "-", 529]]]
-    assert tables.program_facts(bi, 100, program, mult_value=1) == [["op", "-", 529]]
-    assert tables.program_facts(bi, 100, program, mult_value=0) == []
-    assert tables.program_facts(bi, 104, program) == []  # pc not covered
-    assert tables.program_facts(bi, 100, {100: (529,)}) == []  # wrong length
+    gated = facts(program)
+    assert implied(gated, ["m", "*", ["op", "-", 529]]) and not implied(gated, ["op", "-", 529])
+    assert implied(facts(program, ["m", "-", 1]), ["op", "-", 529])  # mult known: ungated
+    assert not implied(facts(program, "m"), ["op", "-", 529])  # mult 0: nothing
+    for other in ({104: (529, 7)}, {100: (529,)}):  # pc not covered; wrong length
+        assert not implied(facts(other), ["m", "*", ["op", "-", 529]])
 
 
 def test_program_pins_flags_once_pc_and_mult_are_known():

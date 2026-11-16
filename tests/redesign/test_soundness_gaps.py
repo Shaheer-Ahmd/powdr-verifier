@@ -1,9 +1,10 @@
 """Soundness gaps: values for lookup-only columns, opaque recipes, the trusted program."""
 
 from src.polysolver import BABYBEAR, Implied, PolySolver, VarTable
-from src.redesign import tables
+from src.redesign import lookups
+from src.redesign.adapter import reference_solver
 from src.redesign.check import check, check_step
-from src.redesign.circuit import Circuit, load_program, lookup_ranges, program_of
+from src.redesign.circuit import Circuit, load_program, program_of
 
 P = BABYBEAR
 LOW = "rd_aux_cols__base__timestamp_lt_aux__lower_decomp__0_3@122"
@@ -77,22 +78,22 @@ def test_stateful_use_declines():
 
 
 def test_bound_orders_only_the_checked_arguments():
-    assert tables.bound(lookup(3, "x", 17), 0) == 2**17
-    assert tables.bound(lookup(3, "x", 17), 1) is None
-    assert tables.bound(lookup(3, "x", "bits"), 0) is None
-    assert tables.bound(lookup(6, "x", "y", "z", 1), 1) == 256
-    assert tables.bound(lookup(6, "x", "y", "z", 1), 2) is None
-    assert tables.bound(lookup(2, "x"), 0) is None
+    assert lookups.bound(lookup(3, "x", 17), 0) == 2**17
+    assert lookups.bound(lookup(3, "x", 17), 1) is None
+    assert lookups.bound(lookup(3, "x", "bits"), 0) is None
+    assert lookups.bound(lookup(6, "x", "y", "z", 1), 1) == 256
+    assert lookups.bound(lookup(6, "x", "y", "z", 1), 2) is None
+    assert lookups.bound(lookup(2, "x"), 0) is None
 
 
 def test_lookup_holds_needs_a_row_or_mult_zero():
     s = PolySolver(VarTable(), declared=["a"])
     defs = s.make_defs({"x": 300})
-    assert tables.lookup_holds(s, lookup(3, "x", 12), defs)
-    assert not tables.lookup_holds(s, lookup(3, "x", 8), defs)
-    assert tables.lookup_holds(s, lookup(3, "x", 8, mult=0), defs)
-    assert not tables.lookup_holds(s, lookup(3, "a", 8), defs)  # not a constant
-    assert not tables.lookup_holds(s, lookup(3, "nope", 8), defs)  # no value
+    assert lookups.lookup_holds(s, lookup(3, "x", 12), defs)
+    assert not lookups.lookup_holds(s, lookup(3, "x", 8), defs)
+    assert lookups.lookup_holds(s, lookup(3, "x", 8, mult=0), defs)
+    assert not lookups.lookup_holds(s, lookup(3, "a", 8), defs)  # not a constant
+    assert not lookups.lookup_holds(s, lookup(3, "nope", 8), defs)  # no value
 
 
 def test_linear_root():
@@ -175,12 +176,12 @@ def test_program_rows_come_from_the_unopt_block():
 
 def test_pc_lookup_is_decided_only_inside_the_block():
     program = {100: (1, 2, 3), 104: (4, 5, 6)}
-    assert tables.is_row(2, [100, 1, 2, 3], program) is True
-    assert tables.is_row(2, [104, 1, 2, 3], program) is False  # another instruction
-    assert tables.is_row(2, [100, 1, 2], program) is False
-    assert tables.is_row(2, [108, 1, 2, 3], program) is None  # a pc the block lacks
-    assert tables.is_row(2, [100, 1, 2, 3]) is None  # no program: not evaluated
-    assert tables.is_row(2, [100, 1, 2, 3], {}) is None
+    assert lookups.is_row(2, [100, 1, 2, 3], program) is True
+    assert lookups.is_row(2, [104, 1, 2, 3], program) is False  # another instruction
+    assert lookups.is_row(2, [100, 1, 2], program) is False
+    assert lookups.is_row(2, [108, 1, 2, 3], program) is None  # a pc the block lacks
+    assert lookups.is_row(2, [100, 1, 2, 3]) is None  # no program: not evaluated
+    assert lookups.is_row(2, [100, 1, 2, 3], {}) is None
 
 
 def test_pc_lookup_rungs():
@@ -223,4 +224,6 @@ def test_lookup_ranges_come_from_ungated_lookups_of_bare_columns():
         lookup(3, "g", 8, mult="sel"), lookup(3, "z", 8, mult=0), lookup(3, "w", "bits"),
         lookup(6, "u", "v", 0, 1), lookup(6, "s", "s", 0, 7), lookup(2, "pc", 1),
     ])
-    assert sorted(lookup_ranges(c)) == [("u", 0, 255), ("v", 0, 255), ("x", 0, 4095)]
+    s = reference_solver(VarTable(), c, trust_execution=False)
+    ranged = {x: s.interval(x)[:2] for x in c.columns if s.interval(x) is not None}
+    assert ranged == {"u": (0, 255), "v": (0, 255), "x": (0, 4095)}

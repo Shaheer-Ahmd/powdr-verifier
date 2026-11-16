@@ -44,7 +44,7 @@ from .circuit import (
     recipe_columns,
     substitute,
 )
-from .tables import bound, lookup_holds
+from .lookups import bound, lookup_holds
 
 
 class MissingDefinition(Exception):
@@ -168,11 +168,11 @@ def _lookup_only_value(
 
     Candidates, in order: 0, then for each lookup argument that mentions the
     column the value that makes that argument 0 (PolySolver.linear_root),
-    tightest table bound first (tables.bound). 0 is a row of every range
+    tightest table bound first (lookups.bound). 0 is a row of every range
     table, so meeting the tightest check exactly leaves the slack to the wider
     ones: in the timestamp gadget [low, 17], [(gap - low) / 2^17, 12] the root
     low = gap is the honest split. The first candidate under which every
-    lookup holds (tables.lookup_holds) is kept. The order is a heuristic; the
+    lookup holds (lookups.lookup_holds) is kept. The order is a heuristic; the
     sweep evaluates every lookup again. A stateful use declines: its value is
     not ours to choose from the tables alone.
     """

@@ -90,18 +90,18 @@ def test_hint_verdicts_match_the_counters(recorded):
         assert n[(1, 1)] == s["hints_agreed"]
     key = ("2100224", "002->003", "completeness")
     s = _steps(db, run)[key]
-    # test_opcode_flags_pinned_by_one_hot has (6339, 4564) without rule C.
-    assert (s["hints_accepted"], s["hints_rejected"]) == (8508, 2395)
+    # test_opcode_flags_pinned_by_one_hot has (6354, 4549) without rule C.
+    assert (s["hints_accepted"], s["hints_rejected"]) == (8523, 2380)
     # Every pin has a hint that agrees: pins (one-hot, rule C) and constants
     # (x - c), all derived before the hints.
-    assert s["hints_agreed"] == s["pinned"] + s["constants_solved"] == 7370
+    assert s["hints_agreed"] == s["pinned"] + s["constants_solved"] == 7390
     o = _steps(db, off)[key]
     assert o["hints_agreed"] == o["constants_solved"] == 4111 and o["pinned"] == 0
     # Rejected there: mostly the shift chip's constants (rule C pins load/store).
     rejected = Counter()
     for r in db.hint_forms(run, Filters(pair="002->003"), accepted=False):
         rejected[r["form"]] += r["n"]  # summed over the reject kinds
-    assert rejected == {"c": 2359, "y": 36}
+    assert rejected == {"c": 2344, "y": 36}
 
 
 SOLVER = {"passes": ["solver"], "directions": ("completeness",)}  # steps with hints

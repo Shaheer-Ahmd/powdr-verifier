@@ -79,6 +79,8 @@ BUS_ROWS = [
     ("congruence", "via mapping", "same, with mapped columns substituted"),
     ("table-semantics", "direct", "args in the table's ranges, xor proved (M4i)"),
     ("table-semantics", "via mapping", "same, with mapped columns substituted"),
+    ("program-semantics", "direct", "a PcLookup's args proved equal to the program row at its pc"),
+    ("program-semantics", "via mapping", "same, with mapped columns substituted"),
 ]
 BUS_RUNG_NOTE = {
     "trivial": "rung 1, canon mult = 0",
@@ -86,7 +88,8 @@ BUS_RUNG_NOTE = {
     "evaluated": "rung 3, table row (not PcLookup)",
     "evaluated-program": "rung 3, PcLookup row; trusts the dump's block as the program",
     "congruence": "rung 4, PolySolver implies_equal",
-    "table-semantics": "rung 5, PolySolver interval + implies_equal",
+    "table-semantics": "rung 5, lookups.prove: interval + implies",
+    "program-semantics": "rung 5, lookups.prove on a PcLookup; trusts the dump's block",
 }
 
 LEGEND = """\

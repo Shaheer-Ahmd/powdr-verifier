@@ -102,7 +102,7 @@ def test_mixed_is_zero_witness():
 
 @pytest.mark.parametrize(
     "one_hot, hints, undecided",
-    [(True, (6339, 4564), 282), (False, (4285, 6618), 1150)],
+    [(True, (6354, 4549), 282), (False, (4285, 6618), 1150)],
     ids=["one-hot pass", "no one-hot pass"],
 )
 def test_opcode_flags_pinned_by_one_hot(one_hot, hints, undecided):

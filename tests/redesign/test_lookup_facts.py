@@ -1,12 +1,13 @@
 """M4i: lookup facts as premises, and the table-semantics rung."""
 
-from src.polysolver import BABYBEAR, PolySolver, VarTable
-from src.redesign import tables
+from src.polysolver import BABYBEAR, Implied, PolySolver, VarTable
+from src.redesign import lookups
+from src.redesign.adapter import reference_solver
 from src.redesign.check import check_step
 from src.redesign.circuit import Circuit
 
 P = BABYBEAR
-RANGE, BITWISE = tables.VARIABLE_RANGE_CHECKER, tables.BITWISE_LOOKUP
+RANGE, BITWISE = lookups.VARIABLE_RANGE_CHECKER, lookups.BITWISE_LOOKUP
 
 
 def circuit(label, constraints=(), buses=()):
@@ -44,16 +45,37 @@ def test_interval_of_affine_forms():
 # ------------------------------------------------------------ facts
 
 
+def assumed(bi, *premises, names=("x", "y", "z", "a", "b", "m")):
+    """A solver over ``names`` with ``premises`` and the lookup ``bi`` assumed."""
+    s = PolySolver(VarTable(), declared=list(names))
+    for i, e in enumerate(premises):
+        s.add_premise(e, f"p{i}")
+    s.propagate()
+    lookups.assume(s, "r", [bi])
+    return s
+
+
+def implied(s, e):
+    return isinstance(s.implies(e), Implied)
+
+
 def test_xor_facts():
-    f = tables.lookup_facts
-    assert f(lookup(BITWISE, "b", 255, "a", 1)) == [[["a", "+", "b"], "-", 255]]
-    assert f(lookup(BITWISE, "x", 0, "z", 1)) == [["z", "-", "x"]]
-    assert f(lookup(BITWISE, "x", "y", 0, 1)) == [["x", "-", "y"]]
-    assert f(lookup(BITWISE, "x", "x", "z", 1)) == ["z"]
-    assert f(lookup(BITWISE, "x", 7, "z", 1)) == []  # xor 7: not polynomial here
-    assert f(lookup(BITWISE, "x", 0, "z", 1, mult="m")) == [["m", "*", ["z", "-", "x"]]]
-    assert f(lookup(BITWISE, "x", 0, "z", 1, mult=0)) == []
-    assert f(lookup(RANGE, "x", 1)) == [["x", "*", ["x", "-", 1]]]
+    assert implied(assumed(lookup(BITWISE, "b", 255, "a", 1)), [["a", "+", "b"], "-", 255])
+    assert implied(assumed(lookup(BITWISE, "x", 0, "z", 1)), ["z", "-", "x"])
+    assert implied(assumed(lookup(BITWISE, "x", "y", 0, 1)), ["x", "-", "y"])
+    assert implied(assumed(lookup(BITWISE, "x", "x", "z", 1)), "z")
+    s = assumed(lookup(BITWISE, "x", 7, "z", 1))  # xor 7: not polynomial here
+    assert not implied(s, ["z", "-", "x"]) and s.interval("z")[:2] == (0, 255)
+    gated = assumed(lookup(BITWISE, "x", 0, "z", 1, mult="m"))
+    assert implied(gated, ["m", "*", ["z", "-", "x"]]) and not implied(gated, ["z", "-", "x"])
+    off = assumed(lookup(BITWISE, "x", 0, "z", 1, mult=0))
+    assert not implied(off, ["z", "-", "x"]) and off.interval("x") is None
+    assert implied(assumed(lookup(RANGE, "x", 1)), ["x", "*", ["x", "-", 1]])
+
+
+def test_xor_facts_read_constants_semantically():
+    # y is not written 0 but pinned to 0 by a premise: the same case applies.
+    assert implied(assumed(lookup(BITWISE, "x", "y", "z", 1), "y"), ["z", "-", "x"])
 
 
 def test_xor_255_closes_low_degree_bus_completeness():
@@ -135,11 +157,11 @@ OR_LOOKUP = lookup(BITWISE, "c1", "c2", [[[2, "*", "a"], "-", "c1"], "-", "c2"],
 
 
 def test_bit_xor_fact_needs_bits():
-    is_bit = lambda e: e in ("c1", "c2")  # noqa: E731
-    xor = ["z", "-", [["c1", "+", "c2"], "-", [2, "*", ["c1", "*", "c2"]]]]
-    assert tables.lookup_facts(lookup(BITWISE, "c1", "c2", "z", 1), is_bit=is_bit) == [xor]
-    assert tables.lookup_facts(lookup(BITWISE, "c1", "y", "z", 1), is_bit=is_bit) == []
-    assert tables.lookup_facts(lookup(BITWISE, "c1", "c2", "z", 1)) == []  # no ranges known
+    xor = ["z", "-", [["x", "+", "y"], "-", [2, "*", ["x", "*", "y"]]]]
+    bits = [BOOL("x"), BOOL("y")]
+    assert implied(assumed(lookup(BITWISE, "x", "y", "z", 1), *bits), xor)
+    assert not implied(assumed(lookup(BITWISE, "x", "y", "z", 1), BOOL("x")), xor)
+    assert not implied(assumed(lookup(BITWISE, "x", "y", "z", 1)), xor)  # no ranges known
 
 
 def test_bit_xor_closes_or_both_ways():
@@ -164,13 +186,13 @@ def test_bit_xor_needs_bits_and_the_right_z():
 
 # ------------------------------------------------------------ tuple range checker
 
-TUPLE = tables.TUPLE_RANGE_CHECKER
+TUPLE = lookups.TUPLE_RANGE_CHECKER
 
 
 def test_tuple_rows():
-    assert tables.is_row(TUPLE, [255, 2047]) is True
-    assert tables.is_row(TUPLE, [256, 0]) is False
-    assert tables.is_row(TUPLE, [0, 2048]) is False
+    assert lookups.is_row(TUPLE, [255, 2047]) is True
+    assert lookups.is_row(TUPLE, [256, 0]) is False
+    assert lookups.is_row(TUPLE, [0, 2048]) is False
 
 
 def test_tuple_rung_and_ranges():
@@ -211,10 +233,9 @@ def test_zero_check_on_composite():
 
 
 def test_xor_output_is_a_byte():
-    from src.redesign.circuit import lookup_ranges
     ref = circuit("r", buses=[lookup(BITWISE, "x", "y", "z", 1)])
-    assert ("z", 0, 255) in lookup_ranges(ref)
+    assert reference_solver(VarTable(), ref).interval("z")[:2] == (0, 255)
     cand = circuit("c", buses=[lookup(BITWISE, "z", 0, 0, 0)])
     assert one(check_step(cand, ref, {}, ("soundness",))[0]).rung == "table-semantics"
     ref = circuit("r", buses=[lookup(BITWISE, "x", "y", "z", 0)])  # op 0: no z range from this lookup
-    assert ("z", 0, 255) not in lookup_ranges(ref)
+    assert reference_solver(VarTable(), ref).interval("z") is None

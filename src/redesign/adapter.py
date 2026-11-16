@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from src.polysolver import Expr, PolySolver, VarTable
 
-from .circuit import Circuit, byte_ranges, lookup_ranges
+from . import lookups
+from .circuit import Circuit, byte_ranges
 from .execution import execution_facts
-from .tables import PC_LOOKUP, constant, lookup_facts, program_facts
 
 HINT_TAG = "hint:"  # tag prefix of powdr's substitutions, in verdicts and solved_log
 
@@ -41,19 +41,18 @@ def reference_solver(
     three values that the check cannot decide gets a case split over the
     variable's group (rule C). With ``nowrap_pins``, a premise that is a sum
     of ranged variables that cannot wrap pins each of them to 0 (rule S').
-    ``use_lookup_ranges`` also takes ranges from the reference's own range
-    and bitwise lookups with a constant nonzero multiplicity: such a lookup
-    is part of the reference circuit, so it holds for every witness.
-    ``use_lookup_facts`` adds the polynomial identities of the reference's
-    bitwise and range lookups (tables.lookup_facts, M4i), gated by their
-    multiplicity, as premises.
+    The reference's own lookups hold for every witness (they are part of
+    the reference circuit); lookups.assume reads them by their cases:
+    ``use_lookup_ranges`` takes their bounds as ranges (a bare variable and
+    a known nonzero multiplicity), ``use_lookup_facts`` their identities as
+    premises, gated by the multiplicity (M4i).
     ``trust_execution`` adds the APC execution assumption (execution.py):
     entry at ``entry_pc``, every instruction runs, and each execution-bus
     send equals the next receive. These are trusted, not derived.
     ``use_program_facts`` (needs ``program``, the trusted PcLookup table):
-    once propagation makes a reference PcLookup's pc a constant, the
-    program's row at that pc gives mult * (arg - row) = 0 per argument
-    (tables.program_facts); repeated while new pcs become constant.
+    once a reference PcLookup's pc is known, the program's row at that pc
+    gives mult * (arg - row) = 0 per argument (lookups.assume, which
+    repeats while facts make new pcs known).
     """
     s = PolySolver(
         table,
@@ -68,52 +67,21 @@ def reference_solver(
     if use_ranges:
         for x, lo, hi in byte_ranges(ref):
             s.add_range(x, lo, hi, tag=f"{ref.label}:bytes:{x}")
-    if use_lookup_ranges:
-        for x, lo, hi in lookup_ranges(ref):
-            s.add_range(x, lo, hi, tag=f"{ref.label}:lookup:{x}")
-    if use_lookup_facts:
-
-        def is_bit(e: Expr) -> bool:  # by the ranges and premises so far
-            iv = s.interval(e)
-            return iv is not None and iv[1] <= 1
-
-        for j, bi in enumerate(ref.stateless):
-            for k, e in enumerate(lookup_facts(bi, s.p, is_bit)):
-                s.add_premise(e, tag=f"{ref.label}:b{j}:fact{k}")
     if trust_execution:
         for name, e in execution_facts(ref, entry_pc, s.p):
             s.add_premise(e, tag=f"{ref.label}:exec:{name}")
     s.propagate()
-    if use_program_facts and program:
-        _add_program_facts(s, ref, program)
+    # The reference's lookups, read by lookups.cases: identities as premises,
+    # bounds as ranges, PcLookup rows from the trusted program.
+    lookups.assume(
+        s,
+        ref.label,
+        ref.stateless,
+        ranges=use_lookup_ranges,
+        facts=use_lookup_facts,
+        program=program if use_program_facts and program else None,
+    )
     if hints:
         s.add_solved_all([(x, t, f"{HINT_TAG}{x}") for x, t in hints])
     return s
 
-
-def _add_program_facts(s: PolySolver, ref: Circuit, program: dict) -> None:
-    """Add program_facts for each PcLookup whose pc propagation made constant.
-
-    A fact can pin flags that make another lookup's pc constant (a branch
-    target), so this repeats until a round adds nothing.
-    """
-    lookups = [(j, bi) for j, bi in enumerate(ref.stateless) if bi["id"] == PC_LOOKUP]
-    done: set[int] = set()
-    while True:
-        added = False
-        for j, bi in lookups:
-            if j in done or not bi["args"]:
-                continue
-            nf = s.normal_form(bi["args"][0])
-            pc = constant(nf) if nf is not None else None
-            if pc is None:
-                continue
-            done.add(j)
-            m = s.normal_form(bi["mult"])
-            facts = program_facts(bi, pc, program, constant(m) if m is not None else None)
-            for k, e in enumerate(facts):
-                s.add_premise(e, tag=f"{ref.label}:b{j}:program{k}")
-                added = True
-        if not added:
-            return
-        s.propagate()

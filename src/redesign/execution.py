@@ -29,7 +29,7 @@ from __future__ import annotations
 from src.polysolver import BABYBEAR, Expr, variables
 
 from .circuit import Circuit, _const_value
-from .tables import PC_LOOKUP
+from .lookups import PC_LOOKUP
 
 EXECUTION_BRIDGE = 0  # [pc, timestamp]; receive -m (from_state), send m (to_state)
 # The APC's own activity column, which powdr's last step puts on every

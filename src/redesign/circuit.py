@@ -11,14 +11,6 @@ from src.lens.resolve import base_dump_path, group_dir, resolve, substitutions_p
 from src.paths import POWDR_DUMPS_DIR
 from src.polysolver import BABYBEAR, Expr, variables
 
-from .tables import (
-    BITWISE_LOOKUP,
-    MAX_BITS,
-    TUPLE_RANGE_CHECKER,
-    TUPLE_SIZES,
-    VARIABLE_RANGE_CHECKER,
-)
-
 MEMORY_BUS = 1
 PC_STEP = 4  # pcs of consecutive instructions (OpenVM's DEFAULT_PC_STEP)
 # Lookups into fixed tables: PcLookup, VariableRangeChecker, BitwiseLookup,
@@ -167,41 +159,6 @@ def _const_value(e: Expr, p: int) -> int | None:
             return None
         return {"+": a + b, "-": a - b, "*": a * b}[e[1]] % p
     return None
-
-
-def lookup_ranges(c: Circuit, p: int = BABYBEAR) -> list[tuple[str, int, int]]:
-    """Ranges that the circuit's own table lookups give its bare columns.
-
-    A lookup whose multiplicity is a nonzero constant holds for every
-    witness, so its tuple is a row: [x, bits] on the range checker gives
-    x < 2^bits, and [x, y, z, op] with op 0 or 1 on the bitwise table gives
-    x, y < 256 (and z < 256 for op 1, z = x xor y); [x, y] on the tuple
-    range checker gives x, y below TUPLE_SIZES. Gated lookups and expression
-    arguments are skipped, which costs completeness only.
-    """
-    out: dict[str, tuple[str, int, int]] = {}
-
-    def add(x: Expr, hi: int) -> None:
-        if isinstance(x, str):
-            out[x] = (x, 0, min(hi, out[x][2]) if x in out else hi)
-
-    for bi in c.bus_interactions:
-        mult, args = bi["mult"], bi["args"]
-        if not _const_value(mult, p):  # gated (symbolic) or 0
-            continue
-        if bi["id"] == VARIABLE_RANGE_CHECKER and len(args) == 2:
-            bits = args[1]
-            if isinstance(bits, int) and not isinstance(bits, bool) and 0 <= bits <= MAX_BITS:
-                add(args[0], 2**bits - 1)
-        elif bi["id"] == BITWISE_LOOKUP and len(args) == 4 and args[3] in (0, 1):
-            add(args[0], 255)
-            add(args[1], 255)
-            if args[3] == 1:  # every xor row has z = x xor y < 256
-                add(args[2], 255)
-        elif bi["id"] == TUPLE_RANGE_CHECKER and len(args) == 2:
-            add(args[0], TUPLE_SIZES[0] - 1)
-            add(args[1], TUPLE_SIZES[1] - 1)
-    return list(out.values())
 
 
 def recipe_columns(recipe: Any) -> set[str]:
