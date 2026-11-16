@@ -4,6 +4,11 @@ The answer to a query q is ``Implied`` (with what it rests on) or
 ``Unknown``; there is no "not implied". The solver knows nothing about
 circuits: only variables, polynomials, ranges and definitions.
 
+Goals: ``Zero(e)`` is e = 0, decided by the rules below (``implies``);
+``Bounded(e, hi)`` is 0 <= e <= hi on e's representative, decided by the
+interval of e over the domains (``bounded``). ``entails`` decides a
+conjunction of goals and returns one verdict resting on all of them.
+
 The store:
 - P: premises, polynomials each read as "= 0" (add_premise). Trusted.
 - R: ranges lo <= x <= hi on the integer representative of x (add_range).
@@ -157,7 +162,9 @@ class UndefinedVariable(LookupError):
 
 @dataclass(frozen=True)
 class Implied:
-    rule: str  # "trivial" | "normalize" | "nowrap-split" | "sum" | "quotient-split" | "unit-cancel"
+    # "trivial" | "normalize" | "nowrap-split" | "sum" | "quotient-split" | "unit-cancel"
+    # for a Zero goal; "interval" for a Bounded one; "conjunction" for several
+    rule: str
     premises: tuple[str, ...] = ()  # tags of the premises used
     ranges: tuple[str, ...] = ()  # variables whose ranges were used
     defs: tuple[str, ...] = ()  # defined variables that occur in q
@@ -173,13 +180,33 @@ class Unknown:
     # Machine-readable reason: "opaque", "expansion-limit", "nonzero-constant",
     # "no-match", a near miss of rule S: "nowrap-missing-range", "nowrap-bound",
     # or "quotient": rule Q applied and one of its two cases was not proved.
+    # For a Bounded goal: "no-interval" (not affine over ranged variables) or
+    # "interval-bound" (an interval, but wider than the bound).
     kind: str = "no-match"
 
 
 Verdict = Implied | Unknown
 
 
-class _Zero(NamedTuple):
+@dataclass(frozen=True)
+class Zero:
+    """Goal: e = 0 (in F_p)."""
+
+    e: Expr
+
+
+@dataclass(frozen=True)
+class Bounded:
+    """Goal: 0 <= e <= hi, for e's representative in [0, p)."""
+
+    e: Expr
+    hi: int
+
+
+Goal = Zero | Bounded
+
+
+class _ZeroDenominator(NamedTuple):
     """A quotient's denominator d with d = 0 implied: f = 0."""
 
     verdict: Implied
@@ -741,6 +768,44 @@ class PolySolver:
         """Is ``a = b`` implied, as values in F_p? The same question as implies(a - b)."""
         return self.implies([a, "-", b], defs)
 
+    def bounded(self, e: Expr, hi: int, defs: Defs = NO_DEFS) -> Verdict:
+        """Is ``0 <= e <= hi`` implied, for e's representative? Decided by ``interval``."""
+        iv = self.interval(e, defs)
+        if iv is None:
+            return Unknown("interval: not affine over ranged variables", "no-interval")
+        _, top, ranged = iv
+        if top > hi:
+            return Unknown(f"interval: up to {top}, bound {hi}", "interval-bound")
+        names = variables(e)
+        # interval read e, so every name in it is declared or defined.
+        mine = tuple(sorted(n for n in names if self._var(n) not in self.declared))
+        solved = self._solved_tags(self._q_vars(names, defs))
+        return Implied("interval", ranges=ranged, defs=mine, solved=solved)
+
+    def entails(self, goals: Iterable[Goal], defs: Defs = NO_DEFS) -> Verdict:
+        """Is every goal implied? One verdict for the conjunction.
+
+        A Zero goal is decided by ``implies``, a Bounded one by ``bounded``.
+        Implied rests on everything the goals' verdicts rest on (a single
+        goal's verdict is returned as it is; no goals is "trivial"); Unknown
+        is the first goal that is not implied, with its kind.
+        """
+        parts: list[Implied] = []
+        for i, g in enumerate(goals):
+            if isinstance(g, Zero):
+                v = self.implies(g.e, defs)
+            elif isinstance(g, Bounded):
+                v = self.bounded(g.e, g.hi, defs)
+            else:
+                raise TypeError(f"not a goal: {g!r}")
+            if isinstance(v, Unknown):
+                return Unknown(f"goal {i} {g}: {v.note}", v.kind)
+            parts.append(v)
+        if len(parts) == 1:
+            return parts[0]
+        merged = self._merged("conjunction" if parts else "trivial", parts)
+        return replace(merged, defs=tuple(sorted({n for v in parts for n in v.defs})))
+
     def normal_form(
         self, e: Expr, defs: Defs = NO_DEFS, free: Iterable[str] = ()
     ) -> tuple | None:
@@ -1168,7 +1233,7 @@ class PolySolver:
         opened = None
         for fname, f, (n, d) in zip(quotients, fs, nds):
             c = self._classify(d)
-            if isinstance(c, _Zero):
+            if isinstance(c, _ZeroDenominator):
                 sub[f] = {}
                 zeros.append(c.verdict)
             elif isinstance(c, _Unit):
@@ -1289,7 +1354,7 @@ class PolySolver:
                 out.setdefault(k, tag)
         return out
 
-    def _classify(self, d: P.Poly) -> _Zero | _Unit | None:
+    def _classify(self, d: P.Poly) -> _ZeroDenominator | _Unit | None:
         """What this solver knows of a denominator d (under Sol); None if nothing.
 
         The one place that decides between rule Q (None: open) and rule U.
@@ -1299,7 +1364,7 @@ class PolySolver:
         k = P.zkey(d, self.p)
         zero = self._decide_cached(k)
         if isinstance(zero, Implied):
-            return _Zero(zero)
+            return _ZeroDenominator(zero)
         if P.is_constant(k):  # nonzero: no atom, nothing to clear
             return _Unit(None, None)
         tag = self._nonzero_keys().get(k)

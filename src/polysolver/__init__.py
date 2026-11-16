@@ -6,15 +6,27 @@ variables, polynomials, ranges and definitions. See ``solver.py``.
 
 from .defs import NO_DEFS, Defs, InvalidDefs, Opaque, Quotient
 from .expr import Expr, UnsupportedExpr, product_factors, sum_terms, variables
-from .solver import BABYBEAR, Implied, PolySolver, UndefinedVariable, Unknown, Verdict
+from .solver import (
+    BABYBEAR,
+    Bounded,
+    Goal,
+    Implied,
+    PolySolver,
+    UndefinedVariable,
+    Unknown,
+    Verdict,
+    Zero,
+)
 from .table import Var, VarTable
 from .witness import find_uniform_witness, find_witness
 
 __all__ = [
     "BABYBEAR",
+    "Bounded",
     "NO_DEFS",
     "Defs",
     "Expr",
+    "Goal",
     "Implied",
     "InvalidDefs",
     "Opaque",
@@ -26,6 +38,7 @@ __all__ = [
     "Var",
     "VarTable",
     "Verdict",
+    "Zero",
     "find_uniform_witness",
     "find_witness",
     "product_factors",
