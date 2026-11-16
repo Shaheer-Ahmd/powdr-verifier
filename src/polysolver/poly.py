@@ -6,11 +6,19 @@ Coefficients live in ``[1, p)``; zero terms are dropped.
 
 The zero key makes a polynomial monic, so two polynomials with the same key
 differ by a nonzero constant factor and have the same zeros.
+
+Division: an inverse atom is an ordinary Var I that stands for the inverse
+of a polynomial d: ``inverse_of`` maps I to d. That is a definition, not a
+claim: I * d = 1 holds only where d != 0, so nothing cancels on its own; add,
+mul and substitute treat I like any variable. ``clear_denominators`` is told
+explicitly which polynomials are nonzero, and clears only those atoms:
+there it multiplies a by d, which keeps a's zeros. Each atom may occur with
+power at most 1.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 
 from .expr import OPS, Expr, UnsupportedExpr
 
@@ -169,6 +177,45 @@ def degree(m: Mono) -> int:
 def _order(m: Mono) -> tuple:
     # Highest degree first, then by monomial; the first term is the leading one.
     return (-degree(m), m)
+
+
+def lead_coeff(a: Poly) -> int:
+    """The coefficient of the leading term (the one zkey makes 1); a is nonzero."""
+    return a[min(a, key=_order)]
+
+
+def clear_denominators(
+    a: Poly,
+    inverse_of: dict[int, Poly],
+    nonzero: Collection[Key],
+    p: int,
+    limit: int = MAX_TERMS,
+) -> tuple[Poly, set[Key]] | None:
+    """``a`` times d for each atom I = inverse_of d in it whose d is in ``nonzero``.
+
+    ``nonzero`` holds the zero keys of the polynomials known to be nonzero;
+    an atom whose d is not among them is left as it is, so with no nonzero
+    facts nothing changes. For a cleared atom, writing a = a1 * I + a0,
+    d * a is a1 + a0 * d (I * d = 1 as d != 0), and has the same zeros as a.
+    The polynomials never mention atoms, so the atoms are cleared one at a
+    time. Returns the result and the keys of the nonzero facts it used; None
+    if an atom to clear occurs squared.
+    """
+    used: set[Key] = set()
+    for i in sorted(variables_of(a) & inverse_of.keys()):
+        d = inverse_of[i]
+        k = zkey(d, p)
+        if k == ZERO or k not in nonzero:
+            continue  # not known nonzero: I * d = 1 may fail, keep I
+        split = split_linear(a, i)
+        if split is None:
+            return None
+        a1, a0 = split
+        a = add(a1, mul(a0, d, p, limit), p)
+        if len(a) > limit:
+            raise ExpansionLimit
+        used.add(k)
+    return a, used
 
 
 def zkey(a: Poly, p: int) -> Key:

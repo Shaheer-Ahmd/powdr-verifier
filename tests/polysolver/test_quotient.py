@@ -269,6 +269,32 @@ def test_quotient_split_is_sound_on_small_field():
         assert proved  # f * d - n * d... at least one holds under every premise
 
 
+def test_clear_denominators():
+    p = 101
+    n, x, y, i, j = 0, 1, 2, 3, 4
+    d = {((x, 1),): 1, ((y, 1),): 1}  # x + y
+    inverse_of = {i: d, j: {((x, 1),): 1}}  # i = inv(x + y), j = inv(x)
+    both = {poly.zkey(d, p), poly.zkey({((x, 1),): 1}, p)}
+
+    def clear(a, nonzero):
+        return poly.clear_denominators(a, inverse_of, nonzero, p)
+
+    # n * inv(x + y) * (x + y) - n
+    a = poly.add(poly.mul({((n, 1), (i, 1)): 1}, d, p), {((n, 1),): 1}, p, -1)
+    # Without the nonzero fact nothing is cleared: inv(x + y) * (x + y) = 1
+    # fails where x + y = 0.
+    assert clear(a, set()) == (a, set())
+    assert clear(a, {poly.zkey({((x, 1),): 1}, p)}) == (a, set())  # only x is nonzero
+    # With x + y nonzero it clears to 0, and says which fact it used.
+    assert clear(a, both) == ({}, {poly.zkey(d, p)})
+    # Two atoms: inv(x+y) - inv(x) clears to x - (x + y) = -y.
+    assert clear({((i, 1),): 1, ((j, 1),): p - 1}, both) == ({((y, 1),): p - 1}, both)
+    assert clear({((i, 2),): 1}, both) is None  # squared
+    assert clear({((i, 2),): 1}, set()) == ({((i, 2),): 1}, set())  # nothing to clear
+    # No atom: unchanged.
+    assert clear({((x, 1),): 3}, both) == ({((x, 1),): 3}, set())
+
+
 def test_split_linear():
     x, y = 0, 1
     a = {((x, 1), (y, 1)): 2, ((y, 2),): 3, ((x, 1),): 4, (): 5}
