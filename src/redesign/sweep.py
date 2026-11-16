@@ -57,6 +57,7 @@ from src.polysolver import (
     Quotient,
     UndefinedVariable,
     VarTable,
+    Zero,
     poly,
     variables,
 )
@@ -258,12 +259,7 @@ def sweep(
                 name, "undecided", str(exc), reason="mapping gap", key=key
             )
         if isinstance(v, Implied):
-            detail = ", ".join(
-                v.premises
-                + tuple(f"range {r}" for r in v.ranges)
-                + tuple(f"solved {t}" for t in v.solved)
-            )
-            ob = Obligation(name, v.rule, detail, via_mapping=mapped)
+            ob = Obligation(name, v.rule, _tags(v), via_mapping=mapped)
             return _remember(cache, key, ob)
         # Undecided: record why, so reports can group these.
         reason = _reason(v.kind, cols, mapping)
@@ -458,6 +454,15 @@ def _by_tables_or_congruence(
     return ob
 
 
+def _tags(v: Implied) -> str:
+    """What a verdict rests on, for an obligation's detail."""
+    return ", ".join(
+        v.premises
+        + tuple(f"range {r}" for r in v.ranges)
+        + tuple(f"solved {t}" for t in v.solved)
+    )
+
+
 def _by_table_semantics(
     name, bi, defs, solver: PolySolver, mapped, program=None
 ) -> Obligation | None:
@@ -470,7 +475,7 @@ def _by_table_semantics(
     if proved is None:
         return None
     rung = "program-semantics" if bi["id"] == PC_LOOKUP else "table-semantics"
-    detail = ", ".join([proved.case, *proved.used])
+    detail = ", ".join(filter(None, [proved.case, _tags(proved.verdict)]))
     return Obligation(name, rung, detail, via_mapping=mapped, kind="bus")
 
 
@@ -479,14 +484,11 @@ def _congruence(name, bi, defs, solver, ref, found, mapped) -> Obligation | None
     if found is None:
         return None
     j, J = found
-    used = set()
-    for x, y in zip([bi["mult"], *bi["args"]], [J["mult"], *J["args"]]):
-        v = solver.implies_equal(x, y, defs)
-        if not isinstance(v, Implied):
-            return None
-        used.update(v.premises)
-        used.update(f"solved {t}" for t in v.solved)
-    detail = ", ".join([f"{ref.label}:b{j}", *sorted(used)])
+    pairs = zip([bi["mult"], *bi["args"]], [J["mult"], *J["args"]])
+    v = solver.entails([Zero([x, "-", y]) for x, y in pairs], defs)
+    if not isinstance(v, Implied):
+        return None
+    detail = ", ".join(filter(None, [f"{ref.label}:b{j}", _tags(v)]))
     return Obligation(name, "congruence", detail, via_mapping=mapped, kind="bus")
 
 

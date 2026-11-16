@@ -4,7 +4,7 @@ import itertools
 
 import pytest
 
-from src.polysolver import BABYBEAR, PolySolver, VarTable, poly
+from src.polysolver import BABYBEAR, Bounded, PolySolver, VarTable, Zero, poly
 from src.redesign import lookups as L
 
 P = BABYBEAR
@@ -24,14 +24,20 @@ def written(e):
     return e if isinstance(e, int) else None
 
 
+def true(g, env):
+    """A goal holds under the assignment."""
+    if isinstance(g, Zero):
+        return ev(g.e, env) == 0
+    assert isinstance(g, Bounded)
+    return ev(g.e, env) <= g.hi
+
+
 def check_case(c, bus, env, args, program=None):
     """For one assignment: if the case is selected, it agrees with is_row as it claims."""
-    if any(ev(e, env) for e in c.when) or any(ev(e, env) > 1 for e in c.when_bits):
+    if not all(true(g, env) for g in c.when):
         return False
     row = L.is_row(bus, [ev(a, env) for a in args], program)
-    holds = all(ev(e, env) <= hi for e, hi in c.bounds) and not any(
-        ev(e, env) for e in c.identities
-    )
+    holds = all(true(g, env) for g in c.row)
     if row:
         assert holds, (c.name, env)  # => : sound as a premise
     if c.exact and holds:

@@ -88,7 +88,7 @@ BUS_RUNG_NOTE = {
     "evaluated": "rung 3, table row (not PcLookup)",
     "evaluated-program": "rung 3, PcLookup row; trusts the dump's block as the program",
     "congruence": "rung 4, PolySolver implies_equal",
-    "table-semantics": "rung 5, lookups.prove: interval + implies",
+    "table-semantics": "rung 5, lookups.prove: PolySolver.entails on a case's goals",
     "program-semantics": "rung 5, lookups.prove on a PcLookup; trusts the dump's block",
 }
 

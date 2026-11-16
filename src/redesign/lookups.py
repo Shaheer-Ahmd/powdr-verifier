@@ -7,20 +7,22 @@ trusts it). Everything else reads the tables through it:
 
 - ``is_row``: the ground truth, for constant arguments. It is the oracle the
   case lists are tested against, and the sweep's "evaluated" rungs.
-- ``cases``: a lookup's meaning as Cases. Under its ``when`` conditions, a
-  Case says  row <=> every bound and identity holds  (``exact``), or only
-  row => them (a consequence).
+- ``cases``: a lookup's meaning as Cases of PolySolver goals (Zero for an
+  identity, Bounded for a bound). Under its ``when`` goals, a Case says
+  row <=> every ``row`` goal holds  (``exact``), or only row => them (a
+  consequence).
 - ``assume`` (premise side): the reference's lookups into P and R. For each
-  Case whose conditions hold, its identities become premises (gated by mult
-  unless mult is a known nonzero constant), its bounds ranges (only for a
-  bare variable and a known nonzero mult: a range cannot be gated). Sound by
-  the => direction.
-- ``prove`` (goal side): a candidate lookup holds if some exact Case has its
-  conditions, bounds and identities all proved. Sound by the <= direction.
+  Case whose ``when`` the solver entails, its Zero goals become premises
+  (gated by mult unless mult is a known nonzero constant), its Bounded goals
+  ranges (only for a bare variable and a known nonzero mult: a range cannot
+  be gated). Sound by the => direction.
+- ``prove`` (goal side): a candidate lookup holds if the solver entails
+  some exact Case's ``when`` and ``row`` goals. Sound by the <= direction.
 
-Both sides check a Case's conditions with the same solver queries (_Reader),
-so they recognise the same cases. ``cases`` only proposes: it reads constants
-to pick cases, and every case states the conditions it was picked by.
+This module only translates; PolySolver.entails does every proving step,
+the same call on both sides, so they recognise the same cases. ``cases``
+only proposes: it reads constants to pick cases, and every case states the
+conditions it was picked by.
 
 The semantics follow the SMT encoders in src/bus_interactions/.
 """
@@ -30,7 +32,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from src.polysolver import NO_DEFS, Defs, Expr, Implied, PolySolver
+from src.polysolver import NO_DEFS, Bounded, Defs, Expr, Goal, Implied, PolySolver, Zero
 
 PC_LOOKUP = 2  # [pc, opcode, a, ..., g]: the program's instruction at pc
 VARIABLE_RANGE_CHECKER = 3  # [x, bits]: x < 2^bits
@@ -82,16 +84,16 @@ def is_row(bus: int, args: list[int], program: Program | None = None) -> bool | 
 
 @dataclass(frozen=True)
 class Case:
-    """If every ``when`` is 0 and every ``when_bits`` in [0, 1], then
-    args is a row  <=>  every bound and identity holds  (``exact``),
+    """If every goal in ``when`` holds, then
+    args is a row  <=>  every goal in ``row`` holds  (``exact``),
     or only  =>  (a consequence, for premises only).
+
+    In ``row``, a Zero goal is an identity and a Bounded goal a bound.
     """
 
     name: str  # short, used in premise tags: "xor-y0", "range8", "pc100"
-    when: tuple[Expr, ...] = ()  # identities (= 0) that select the case
-    when_bits: tuple[Expr, ...] = ()  # expressions that must be in [0, 1]
-    bounds: tuple[tuple[Expr, int], ...] = ()  # (e, hi): 0 <= e <= hi
-    identities: tuple[Expr, ...] = ()  # e = 0
+    when: tuple[Goal, ...] = ()  # the conditions that select the case
+    row: tuple[Goal, ...] = ()  # what a row means under them
     exact: bool = True
 
 
@@ -109,8 +111,8 @@ def cases(
         return _range_cases(*args, value)
     if bus == TUPLE_RANGE_CHECKER and len(args) == 2:
         x, y = args
-        bounds = ((x, TUPLE_SIZES[0] - 1), (y, TUPLE_SIZES[1] - 1))
-        return [Case("tuple", bounds=bounds)]
+        row = (Bounded(x, TUPLE_SIZES[0] - 1), Bounded(y, TUPLE_SIZES[1] - 1))
+        return [Case("tuple", row=row)]
     if bus == BITWISE_LOOKUP and len(args) == 4:
         return _bitwise_cases(*args, value)
     if bus == PC_LOOKUP and program and args:
@@ -118,8 +120,8 @@ def cases(
         row = program.get(pc) if pc is not None else None
         if row is None or len(row) != len(args) - 1:
             return []
-        ids = tuple([a, "-", r] for a, r in zip(args[1:], row))
-        return [Case(f"pc{pc}", when=([args[0], "-", pc],), identities=ids)]
+        ids = tuple(Zero([a, "-", r]) for a, r in zip(args[1:], row))
+        return [Case(f"pc{pc}", when=(Zero([args[0], "-", pc]),), row=ids)]
     return []
 
 
@@ -127,13 +129,13 @@ def _range_cases(x: Expr, b: Expr, value) -> list[Case]:
     bits = value(b)
     if bits is None or bits > MAX_BITS:
         return []
-    when = ([b, "-", bits],)
-    out = [Case(f"range{bits}", when=when, bounds=((x, 2**bits - 1),))]
+    when = (Zero([b, "-", bits]),)
+    out = [Case(f"range{bits}", when, (Bounded(x, 2**bits - 1),))]
     # A composite x has no interval, but a narrow check is a polynomial.
     if bits == 0:
-        out.append(Case("range0-poly", when=when, identities=(x,)))
+        out.append(Case("range0-poly", when, (Zero(x),)))
     elif bits == 1:
-        out.append(Case("range1-poly", when=when, identities=([x, "*", [x, "-", 1]],)))
+        out.append(Case("range1-poly", when, (Zero([x, "*", [x, "-", 1]]),)))
     return out
 
 
@@ -141,30 +143,30 @@ def _bitwise_cases(x: Expr, y: Expr, z: Expr, o: Expr, value) -> list[Case]:
     op = value(o)
     if op not in (0, 1):
         return []
-    sel = ([o, "-", op],)
-    xy = ((x, BYTE), (y, BYTE))
+    sel = (Zero([o, "-", op]),)
+    xy = (Bounded(x, BYTE), Bounded(y, BYTE))
     if op == 0:
-        return [Case("and0", when=sel, bounds=xy, identities=(z,))]
+        return [Case("and0", sel, xy + (Zero(z),))]
     out = []
 
-    def case(name, when=(), identities=(), when_bits=()):
-        out.append(Case(name, sel + tuple(when), tuple(when_bits), xy, tuple(identities)))
+    def case(name, when, identity):
+        out.append(Case(name, sel + tuple(when), xy + (Zero(identity),)))
 
     cx, cy = value(x), value(y)
     if cx is not None and cy is not None:
-        case("xor-const", ([x, "-", cx], [y, "-", cy]), ([z, "-", cx ^ cy],))
+        case("xor-const", (Zero([x, "-", cx]), Zero([y, "-", cy])), [z, "-", cx ^ cy])
     for a, ca, other, tag in ((y, cy, x, "y"), (x, cx, y, "x")):
         if ca == 0:  # a = 0: z = the other
-            case(f"xor-{tag}0", (a,), ([z, "-", other],))
+            case(f"xor-{tag}0", (Zero(a),), [z, "-", other])
         elif ca == BYTE:  # a = 255: z = 255 - the other, exact on bytes
-            case(f"xor-{tag}255", ([a, "-", BYTE],), ([[z, "+", other], "-", BYTE],))
+            case(f"xor-{tag}255", (Zero([a, "-", BYTE]),), [[z, "+", other], "-", BYTE])
     if value(z) == 0:
-        case("xor-z0", (z,), ([x, "-", y],))  # x xor y = 0 iff x = y
-    case("xor-same", ([x, "-", y],), (z,))
-    case("xor-bits", identities=([z, "-", [[x, "+", y], "-", [2, "*", [x, "*", y]]]],),
-         when_bits=(x, y))
+        case("xor-z0", (Zero(z),), [x, "-", y])  # x xor y = 0 iff x = y
+    case("xor-same", (Zero([x, "-", y]),), z)
+    case("xor-bits", (Bounded(x, 1), Bounded(y, 1)),
+         [z, "-", [[x, "+", y], "-", [2, "*", [x, "*", y]]]])
     # Every xor row has z < 256; not exact (bytes x, y, z are not a row).
-    out.append(Case("xor-bytes", sel, bounds=xy + ((z, BYTE),), exact=False))
+    out.append(Case("xor-bytes", sel, xy + (Bounded(z, BYTE),), exact=False))
     return out
 
 
@@ -175,11 +177,11 @@ def bound(bi: dict, k: int) -> int | None:
     """
     arg = bi["args"][k] if k < len(bi["args"]) else None
     his = [
-        hi
+        g.hi
         for c in cases(bi, _written_value)
         if c.exact
-        for e, hi in c.bounds
-        if e == arg
+        for g in c.row
+        if isinstance(g, Bounded) and g.e == arg
     ]
     return max(his) + 1 if his else None
 
@@ -189,48 +191,14 @@ def _written_value(e: Expr) -> int | None:
     return e if isinstance(e, int) and not isinstance(e, bool) and e >= 0 else None
 
 
-# ------------------------------------------------------------ reading cases in a solver
+def _value(s: PolySolver, defs: Defs = NO_DEFS) -> Callable[[Expr], int | None]:
+    """``e``'s constant value under the solver, if it has one: for proposing cases."""
 
-
-class _Reader:
-    """The solver queries that decide a Case's parts, the same on both sides.
-
-    Each check returns the tags it used, or None.
-    """
-
-    def __init__(self, s: PolySolver, defs: Defs = NO_DEFS):
-        self.s, self.defs = s, defs
-
-    def value(self, e: Expr) -> int | None:
-        nf = self.s.normal_form(e, self.defs)
+    def value(e: Expr) -> int | None:
+        nf = s.normal_form(e, defs)
         return None if nf is None else constant(nf)
 
-    def zero(self, e: Expr) -> list[str] | None:
-        v = self.s.implies(e, self.defs)
-        if not isinstance(v, Implied):
-            return None
-        return [*v.premises, *(f"solved {t}" for t in v.solved)]
-
-    def within(self, e: Expr, hi: int) -> list[str] | None:
-        iv = self.s.interval(e, self.defs)
-        if iv is None or iv[1] > hi:
-            return None
-        return [f"range {v}" for v in iv[2]]
-
-    def selects(self, c: Case) -> list[str] | None:
-        """The case's conditions hold."""
-        used: list[str] = []
-        for e in c.when:
-            u = self.zero(e)
-            if u is None:
-                return None
-            used += u
-        for e in c.when_bits:
-            u = self.within(e, 1)
-            if u is None:
-                return None
-            used += u
-        return used
+    return value
 
 
 # ------------------------------------------------------------ goal side
@@ -239,34 +207,23 @@ class _Reader:
 @dataclass(frozen=True)
 class Proved:
     case: str
-    used: tuple[str, ...]  # ranges, premises and solved equations behind it
+    verdict: Implied  # the conjunction of the case's conditions and row
 
 
 def prove(
     s: PolySolver, bi: dict, defs: Defs = NO_DEFS, program: Program | None = None
 ) -> Proved | None:
-    """The candidate lookup ``bi`` holds for every witness: some exact Case is proved.
+    """The candidate lookup ``bi`` holds for every witness: some exact Case is entailed.
 
-    Its conditions, bounds and identities all proved give  args is a row,
-    whatever mult is. None if no case is proved.
+    Its conditions and row goals all implied give  args is a row, whatever
+    mult is. None if no case is.
     """
-    r = _Reader(s, defs)
-    for c in cases(bi, r.value, program):
+    for c in cases(bi, _value(s, defs), program):
         if not c.exact:
             continue
-        used = r.selects(c)
-        for e, hi in c.bounds:
-            if used is None:
-                break
-            u = r.within(e, hi)
-            used = None if u is None else used + u
-        for e in c.identities:
-            if used is None:
-                break
-            u = r.zero(e)
-            used = None if u is None else used + u
-        if used is not None:
-            return Proved(c.name, tuple(dict.fromkeys(used)))
+        v = s.entails(c.when + c.row, defs)
+        if isinstance(v, Implied):
+            return Proved(c.name, v)
     return None
 
 
@@ -284,19 +241,20 @@ def assume(
 ) -> None:
     """Add what the reference's ``lookups`` give to ``s``: premises and ranges.
 
-    For each case whose conditions hold in ``s`` (each case once): with
-    ``facts``, its identities as premises, as  mult * e  unless mult is a
-    known nonzero constant; with ``ranges``, its bounds as ranges, only when
-    mult is a known nonzero constant and the bounded expression is a bare
-    variable. PcLookup cases need ``program`` (the trusted table; its
-    identities are added whatever ``facts`` is). A lookup with mult = 0
-    implied gives nothing. An identity that is a constant says nothing
-    usable (0) or would be a contradiction; it is skipped.
+    For each case whose conditions ``s`` entails (each case once), its row
+    goals become facts: with ``facts``, a Zero goal e as the premise e, or
+    mult * e unless mult is a known nonzero constant; with ``ranges``, a
+    Bounded goal as a range, only when mult is a known nonzero constant and
+    the bounded expression is a bare variable. PcLookup cases need
+    ``program`` (the trusted table; its identities are added whatever
+    ``facts`` is). A lookup with mult = 0 implied gives nothing. An identity
+    that is a constant says nothing usable (0) or would be a contradiction;
+    it is skipped.
 
     A fact can make another lookup's pc, op or operands known, so this
     repeats, with propagation, until a round adds nothing.
     """
-    r = _Reader(s)
+    value = _value(s)
     done: set[tuple[int, str]] = set()
     while True:
         added = False
@@ -304,27 +262,26 @@ def assume(
             if bi["id"] == PC_LOOKUP and program is None:
                 continue
             mult = bi["mult"]
-            if r.zero(mult) is not None:
+            if isinstance(s.implies(mult), Implied):
                 continue
-            m = r.value(mult)
-            known = m is not None  # and nonzero, as mult = 0 is not implied
-            for c in cases(bi, r.value, program):
-                if (j, c.name) in done or r.selects(c) is None:
+            known = value(mult) is not None  # and nonzero, as mult = 0 is not implied
+            identities = facts or bi["id"] == PC_LOOKUP
+            for c in cases(bi, value, program):
+                if (j, c.name) in done or not isinstance(s.entails(c.when), Implied):
                     continue
                 done.add((j, c.name))
-                if facts or bi["id"] == PC_LOOKUP:
-                    for k, e in enumerate(c.identities):
-                        if r.value(e) is not None:
-                            continue
-                        s.add_premise(e if known else [mult, "*", e],
-                                      tag=f"{label}:b{j}:{c.name}:{k}")
+                ids = [g.e for g in c.row if isinstance(g, Zero)]
+                for k, e in enumerate(ids if identities else ()):
+                    if value(e) is not None:
+                        continue
+                    s.add_premise(e if known else [mult, "*", e],
+                                  tag=f"{label}:b{j}:{c.name}:{k}")
+                    added = True
+                for g in c.row if ranges and known else ():
+                    x = _bare_variable(s, g.e) if isinstance(g, Bounded) else None
+                    if x is not None:
+                        s.add_range(x, 0, g.hi, tag=f"{label}:lookup:{x}")
                         added = True
-                if ranges and known:
-                    for e, hi in c.bounds:
-                        x = _bare_variable(s, e)
-                        if x is not None:
-                            s.add_range(x, 0, hi, tag=f"{label}:lookup:{x}")
-                            added = True
         if not added:
             return
         s.propagate()
