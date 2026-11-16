@@ -173,7 +173,8 @@ def test_quotient_split_on_the_is_zero_gadget():
     assert v.defs == ("f",)
     # The zero case rests on the ranges, the gadget sum and booleanity.
     assert {"byte:a0", "byte:a3", "inv"} <= set(v.solved)
-    assert s.forks == 1
+    assert "assume f's denominator != 0" in v.premises
+    assert s.forks == 2  # one per case
     assert isinstance(s.implies("cmp"), Unknown)  # nothing leaks out of the fork
     assert s.nowrap_pins == 0
 
@@ -197,11 +198,102 @@ def test_quotient_nonzero_case_is_checked():
 
 def test_quotient_declines():
     s = is_zero_gadget()
-    defs = s.make_defs({"f": Quotient("cmp", SUM), "g": Quotient(1, "a0")})
-    v = s.implies(mul("f", "f"), defs)
-    assert isinstance(v, Unknown) and v.kind == "opaque" and "not linear" in v.note
-    v = s.implies(add("f", "g"), defs)
-    assert isinstance(v, Unknown) and v.kind == "opaque" and "several" in v.note
+    defs = s.make_defs(
+        {"f": Quotient("cmp", SUM), "g": Quotient(1, "a0"), "h": Quotient(1, "a1"),
+         "k": Quotient(1, "a2")}
+    )
+    v = s.implies(mul("f", "f"), defs)  # inv(sum)^2 in the case sum != 0
+    assert isinstance(v, Unknown) and v.kind == "opaque" and "squared" in v.note
+    v = s.implies(add("f", "g"), defs)  # split, but not provable
+    assert isinstance(v, Unknown) and v.kind == "quotient"
+    v = s.implies(add("f", "g", "h", "k"), defs)
+    assert isinstance(v, Unknown) and v.kind == "opaque" and "over the cap" in v.note
+
+
+def test_quotients_sharing_a_denominator_cancel():
+    # f = a / d and g = b / 3d share one inverse atom: f * b - 3 * g * a is 0.
+    s = PolySolver(VarTable(), declared=["a", "b", "d"])
+    defs = s.make_defs({"f": Quotient("a", "d"), "g": Quotient("b", mul(3, "d"))})
+    v = s.implies(sub(mul("f", "b"), mul(3, "g", "a")), defs)
+    assert isinstance(v, Implied) and v.rule == "quotient-split" and v.defs == ("f", "g")
+    # Both d = 0 cases are forks; in each, f or g reads 0 and the rest follows.
+    assert s.forks == 2
+    assert len(s._inverse_of) == 1
+
+
+def test_unit_cancel_in_the_nonzero_fork():
+    # In the fork for sum != 0, f = cmp / sum is a unit quotient: rule U
+    # proves f * sum - cmp by clearing inv(sum), with no split.
+    s = is_zero_gadget()
+    defs = s.make_defs({"f": Quotient("cmp", SUM)})
+    d = poly.expand(SUM, lambda n: poly.var_poly(s.table.var(n)), P)
+    fork = s._assuming(d, set(s.declared), "sum != 0", nonzero=True)
+    v = fork.implies(sub(mul("f", SUM), "cmp"), defs)
+    assert isinstance(v, Implied) and v.rule == "unit-cancel"
+    assert "sum != 0" in v.premises and v.defs == ("f",)
+    assert fork.forks == 0
+    # 3 * sum is the same unit up to a constant.
+    g = s.make_defs({"g": Quotient("cmp", mul(3, SUM))})
+    assert isinstance(fork.implies(sub(mul(3, "g", SUM), "cmp"), g), Implied)
+    # Not a unit outside the fork: there the same query needs rule Q.
+    assert s.implies(sub(mul("f", SUM), "cmp"), defs).rule == "quotient-split"
+
+
+def test_unit_cancel_rests_only_on_the_facts_it_used():
+    # Two nonzero facts in the fork; the query's unit needs only one.
+    s = is_zero_gadget()
+    var = lambda n: poly.var_poly(s.table.var(n))  # noqa: E731
+    d = poly.expand(SUM, lambda n: var(n), P)
+    fork = s._assuming(var("a0"), set(s.declared), "a0 != 0", nonzero=True)
+    fork = fork._assuming(d, set(s.declared), "sum != 0", nonzero=True)
+    v = fork.implies(sub(mul("f", SUM), "cmp"), s.make_defs({"f": Quotient("cmp", SUM)}))
+    assert isinstance(v, Implied) and v.rule == "unit-cancel"
+    assert "sum != 0" in v.premises and "a0 != 0" not in v.premises
+
+
+def test_nonzero_contradicted_by_a_zero():
+    # Assumed d != 0, but d = 0 is a premise: no model is in this fork.
+    s = PolySolver(VarTable(), declared=["n", "d"])
+    s.add_premise("d", "d=0")
+    s.propagate()
+    fork = s._assuming(poly.var_poly(s.table.var("d")), {s.table.var("d")}, "d != 0", nonzero=True)
+    v = fork.implies(sub("f", 1), s.make_defs({"f": Quotient("n", "d")}))
+    assert isinstance(v, Implied) and v.rule == "trivial" and "d != 0" in v.premises
+
+
+def test_quotient_fork_over_the_cap(monkeypatch):
+    from src.polysolver import solver as solver_mod
+
+    monkeypatch.setattr(solver_mod, "FORK_PREMISE_CAP", 0)
+    v = quotient_query(is_zero_gadget())
+    assert isinstance(v, Unknown) and v.kind == "quotient" and "fork over the cap" in v.note
+
+
+def test_quotient_nesting_over_the_cap():
+    # A guard against a fork that fails to see its own assumption: past
+    # QUOTIENT_CAP forks deep, rule Q declines instead of splitting again.
+    from src.polysolver.solver import QUOTIENT_CAP
+
+    s = is_zero_gadget()
+    s._q_depth = QUOTIENT_CAP
+    v = quotient_query(s)
+    assert isinstance(v, Unknown) and v.kind == "opaque" and "nested" in v.note
+
+
+def test_two_quotients_on_the_is_zero_gadget():
+    # The gadget twice over: each product reads cmp - cmp in every case.
+    s = is_zero_gadget()
+    defs = s.make_defs({"f": Quotient("cmp", SUM), "g": Quotient(mul(2, "cmp"), SUM)})
+    v = s.implies(sub(add(mul("f", SUM), mul("g", SUM)), mul(3, "cmp")), defs)
+    assert isinstance(v, Implied) and v.rule == "quotient-split"
+    assert v.defs == ("f", "g")
+
+
+def test_quotient_with_squared_denominator():
+    # d^2 is fine; only inv(d) is limited to the first power.
+    s = PolySolver(VarTable(), declared=["n", "d"])
+    defs = s.make_defs({"f": Quotient("n", "d")})
+    assert isinstance(s.implies(sub(mul("f", "d", "d"), mul("n", "d")), defs), Implied)
 
 
 def test_quotient_with_constant_denominator():
@@ -243,6 +335,15 @@ def test_quotient_split_is_sound_on_small_field():
         add(mul("f", "n"), "d"),
         "f",
         sub("f", "n"),
+        # h = 1 / d shares f's inverse atom; g = d / n has its own.
+        sub("f", mul("n", "h")),
+        sub(mul("h", "d"), 1),
+        "h",
+        mul(sub(mul("f", "d"), "n"), sub(mul("g", "n"), "d")),
+        sub(mul("g", "n"), "d"),
+        add(mul("f", "d"), mul("g", "n")),
+        sub(add(mul("f", "d"), mul("g", "n")), add("n", "d")),
+        mul("f", "g", "n", "d"),
     ]
     premises = [None, "d", sub("d", 1), mul("n", "d"), mul("d", sub("d", 1)), sub("n", "d")]
 
@@ -254,9 +355,15 @@ def test_quotient_split_is_sound_on_small_field():
         if prem is not None:
             s.add_premise(prem, "p")
         s.propagate()
-        defs = s.make_defs({"f": Quotient("n", "d")})
+        defs = s.make_defs(
+            {"f": Quotient("n", "d"), "h": Quotient(1, "d"), "g": Quotient("d", "n")}
+        )
+
+        def q(a, b):
+            return a * pow(b, p - 2, p) % p if b else 0
+
         models = [
-            {"n": n, "d": d, "f": n * pow(d, p - 2, p) % p if d else 0}
+            {"n": n, "d": d, "f": q(n, d), "h": q(1, d), "g": q(d, n)}
             for n in range(p)
             for d in range(p)
             if prem is None or value(prem, {"n": n, "d": d}) == 0

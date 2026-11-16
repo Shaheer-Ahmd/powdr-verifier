@@ -63,18 +63,29 @@ Rules that answer a query, q rewritten under Sol and Defs, cheapest first:
 - L (sum), the reverse of S, with no side condition: q is written
   G * (t_1 + ... + t_n), and N or S proves G * t_j for every j. Then q, their
   sum, is 0.
-- Q (quotient split): q mentions one f := Quotient(n, d), which is n / d if
-  d != 0 and 0 otherwise, and is linear in it: q = q1 * f + q0. Let
-  r = q1 * n + q0 * d. In a model with d != 0, f * d = n, so d * q = r; r
-  Implied gives d * q = 0, and q = 0 as F_p has no zero divisors. In a model
-  with d = 0, f = 0, so q = q0; q0 Implied in the fork for d = 0 gives q = 0.
-  Every model is in one of the two cases.
+- Quotients: q mentions f := Quotient(n, d), which is n / d if d != 0 and 0
+  otherwise. Each f is resolved in the solver at hand: if d = 0 is implied,
+  f = 0; if d is a unit (a nonzero constant, or in the nonzero index), rule U.
+- Q (quotient split): some f is neither. Every model has d = 0 or d != 0,
+  so q is asked again in two forks: one with the premise d = 0, one with d
+  in the nonzero index. q Implied in both gives q. Each fork resolves f and
+  splits on any other open quotient itself (at most QUOTIENT_CAP deep).
+- U (unit cancel): every f is resolved and d is a unit for some. Such an f
+  is n * inv(d), an inverse atom (poly.py). clear_denominators, given the
+  nonzero index, clears it by multiplying q by d (only for a d in the
+  index; without it nothing is cleared): if q = q1 * f + q0, the key is that of
+  d * q = q1 * n + q0 * d. Implied gives d * q = 0, and q = 0 as d != 0 and
+  F_p has no zero divisors. An inverse atom may occur only to the first
+  power. If some e in the nonzero index has e = 0 implied, the fork has no
+  model, and any query with a quotient holds there ("trivial").
 
-The fork for an assumption a = 0 (_assuming) is a child solver holding a
-slice of this one's store (premises near the query, the solved equations
-they mention, the domains of their variables) plus the premise a. Every
-copied fact holds in every model of P and R (I), so every model of P and R
-with a = 0 is a model of the fork's inputs, and a fork verdict holds there.
+The fork for an assumption a = 0 or a != 0 (_assuming) is a child solver
+holding a slice of this one's store (premises near the query, the solved
+equations they mention, the domains of their variables, the nonzero index)
+plus the assumption: the premise a, or a in the nonzero index. Every copied
+fact holds in every model of P and R (I), so every model of P and R with
+the assumption is a model of the fork's inputs, and a fork verdict holds
+there. In a fork, I reads: every model of P, R and the fork's assumptions.
 Any slice is sound; a smaller one loses completeness only. Fork verdicts
 serve one query and never enter this solver's caches.
 
@@ -136,6 +147,8 @@ CASE_SPLIT_NODE_CAP = 100_000
 # variables, and declines over the cap. Any slice is sound.
 FORK_HOPS = 1
 FORK_PREMISE_CAP = 200
+# Rule Q splits on each quotient's denominator: at most 2^cap cases.
+QUOTIENT_CAP = 3
 
 
 class UndefinedVariable(LookupError):
@@ -144,7 +157,7 @@ class UndefinedVariable(LookupError):
 
 @dataclass(frozen=True)
 class Implied:
-    rule: str  # "trivial" | "normalize" | "nowrap-split" | "sum" | "quotient-split"
+    rule: str  # "trivial" | "normalize" | "nowrap-split" | "sum" | "quotient-split" | "unit-cancel"
     premises: tuple[str, ...] = ()  # tags of the premises used
     ranges: tuple[str, ...] = ()  # variables whose ranges were used
     defs: tuple[str, ...] = ()  # defined variables that occur in q
@@ -164,6 +177,23 @@ class Unknown:
 
 
 Verdict = Implied | Unknown
+
+
+class _Zero(NamedTuple):
+    """A quotient's denominator d with d = 0 implied: f = 0."""
+
+    verdict: Implied
+
+
+class _Unit(NamedTuple):
+    """A quotient's denominator d known nonzero: f = n / d (rule U).
+
+    ``key`` is d's zero key as found in the nonzero index and ``tag`` the
+    assumption's; both None for a nonzero constant.
+    """
+
+    key: P.Key | None
+    tag: str | None
 
 
 class _Domain(NamedTuple):
@@ -300,6 +330,16 @@ class PolySolver:
         self.case_split_seconds = 0.0  # its own time
         self.nowrap_pins = 0  # variables rule S' pinned
         self.forks = 0  # child solvers made for rule Q
+        # Inverse atoms (poly.py): I -> the monic polynomial D it is the
+        # inverse of, and D's zero key -> I. A definition only: it says
+        # nothing about D being nonzero (that is the nonzero index). No
+        # premise, solved value or domain mentions an atom. Shared with forks.
+        self._inverse_of: dict[Var, P.Poly] = {}
+        self._atom_for: dict[P.Key, Var] = {}
+        # Polynomials assumed nonzero (rule Q's d != 0 fork), with the
+        # assumption's tag: rule U reads them. Empty outside a fork.
+        self._nonzero: list[tuple[P.Poly, str]] = []
+        self._q_depth = 0  # how many rule Q forks deep this solver is
         # (tag, last verdict, agreed with x's value) per equation, in call order
         self.solved_log: list[tuple[str, Verdict, bool]] = []
 
@@ -667,7 +707,7 @@ class PolySolver:
         if opaque:
             return Unknown(f"opaque: {', '.join(opaque)}", "opaque")
         if quotients:
-            return self._rule_q(q, defs, quotients, used, names)
+            return self._rule_quotients(q, defs, quotients, used, names)
 
         try:
             k = P.zkey(P.expand(q, self._expander(defs), self.p, self.max_terms), self.p)
@@ -1090,93 +1130,216 @@ class PolySolver:
 
     # ------------------------------------------------------------ rule Q
 
-    def _rule_q(
+    def _rule_quotients(
         self, q: Expr, defs: Defs, quotients: list[str], used: list[str], names: set[str]
     ) -> Verdict:
-        """Rule Q: q is q1 * f + q0 for one f := Quotient(n, d); split on d.
+        """q mentions quotients f := Quotient(n, d): resolve each f, or split (rule Q).
 
-        With r = q1 * n + q0 * d (all under the solved equations):
-        - d != 0: f * d = n, so d * q = r. r Implied (rules N and S, on this
-          solver) gives d * q = 0, hence q = 0: no zero divisors.
-        - d = 0: f = 0, so q = q0. q0 Implied in the fork for d = 0
-          (_assuming) gives q = 0 there.
-        Every model is in one case. If d reads as a constant, only one case
-        has models and only it is checked. Declines on several quotients, or
-        q not linear in f. Nothing is cached: the verdict depends on f's
-        definition, not only on q's key.
+        Each f is read in this solver (with n and d under the solved equations):
+        - zero: d = 0 is implied, so f = 0. In the fork for d = 0, rule N
+          finds the assumption itself.
+        - unit: d is a nonzero constant or in the nonzero index, so f = n / d
+          (rule U).
+        - open: neither. Rule Q splits on the first open f's d (two forks,
+          each asked q again), so every f is resolved in some fork.
+        Nothing is cached: the verdict depends on the definitions, not only
+        on q's key.
         """
-        if len(quotients) > 1:
-            return Unknown(f"Q: several quotients: {', '.join(quotients)}", "opaque")
-        (fname,) = quotients
-        f = self._var(fname)
-        if defs.quotients[f] is None:
+        if len(quotients) > QUOTIENT_CAP:
+            return Unknown(
+                f"Q: {len(quotients)} quotients, over the cap of {QUOTIENT_CAP}", "opaque"
+            )
+        fs = [self._var(n) for n in quotients]
+        if any(defs.quotients[f] is None for f in fs):
             return Unknown("expansion limit", "expansion-limit")
         try:
-            qp = P.expand(q, self._expander(defs, frozenset((f,))), self.p, self.max_terms)
-            split = P.split_linear(qp, f)
-            if split is None:
-                return Unknown(f"Q: not linear in {fname}", "opaque")
-            q1, q0 = split
-            n, d = (self._apply_solved(x) for x in defs.quotients[f])
-            r = P.add(
-                P.mul(q1, n, self.p, self.max_terms),
-                P.mul(q0, d, self.p, self.max_terms),
-                self.p,
-            )
+            qp = P.expand(q, self._expander(defs, frozenset(fs)), self.p, self.max_terms)
+            nds = [tuple(self._apply_solved(x) for x in defs.quotients[f]) for f in fs]
         except P.ExpansionLimit:
             return Unknown("expansion limit", "expansion-limit")
-        parts, assumed = [], []
-        if d:  # some model may have d != 0
-            v = self._decide_cached(P.zkey(r, self.p))
-            if not isinstance(v, Implied):
-                return Unknown(f"Q: case {fname}'s denominator != 0: {v.note}", "quotient")
-            parts.append(v)
-        if not d:  # d = 0 in every model: q = q0 here, no assumption needed
-            v = self._decide_cached(P.zkey(q0, self.p))
-        elif P.is_constant(P.zkey(d, self.p)):  # a nonzero constant: no model has d = 0
-            v = None
+        vacuous = self._nonzero_contradicted()
+        if vacuous is not None:  # no model is in this fork: anything holds
+            return replace(vacuous, defs=tuple(sorted([*used, *quotients])))
+        # One decision per quotient (_classify), and it is final: rule Q
+        # runs on an open f, and rule U gets exactly the facts it found.
+        sub: dict[Var, P.Poly] = {}
+        zeros: list[Implied] = []  # the verdicts d = 0 of the zero quotients
+        units: dict[P.Key, str] = {}  # the nonzero facts the units rest on
+        opened = None
+        for fname, f, (n, d) in zip(quotients, fs, nds):
+            c = self._classify(d)
+            if isinstance(c, _Zero):
+                sub[f] = {}
+                zeros.append(c.verdict)
+            elif isinstance(c, _Unit):
+                try:
+                    sub[f] = P.mul(n, self._inverse(d), self.p, self.max_terms)
+                except P.ExpansionLimit:
+                    return Unknown("expansion limit", "expansion-limit")
+                if c.key is not None:
+                    units[c.key] = c.tag
+            elif opened is None:
+                opened = (fname, d)
+        if opened is not None:
+            verdict = self._rule_q(q, defs, names, *opened, nds)
         else:
-            tag = f"assume {fname}'s denominator = 0"
-            fork = self._assuming(d, P.variables_of(q0) | P.variables_of(d), tag)
-            if fork is None:
-                return Unknown(f"Q: case {fname}'s denominator = 0: fork over the cap", "quotient")
-            try:
-                q0_fork = fork._apply_solved(q0)
-            except P.ExpansionLimit:
-                return Unknown("expansion limit", "expansion-limit")
-            v = fork._decide(P.zkey(q0_fork, self.p))
-            if isinstance(v, Implied):
-                # Also the fork's pins that rewrote q0.
-                v = fork._with_solved_tags(v, P.variables_of(q0))
-            assumed.append(tag)
-        if v is not None:
-            if not isinstance(v, Implied):
-                return Unknown(f"Q: case {fname}'s denominator = 0: {v.note}", "quotient")
-            parts.append(v)
-        verdict = self._merged("quotient-split", parts, assumed)
-        mine = self._solved_tags(self._q_vars(names, defs) | P.variables_of(n) | P.variables_of(d))
+            verdict = self._rule_u(qp, sub, zeros, units)
+        if isinstance(verdict, Unknown):
+            return verdict
         # n and d were read under the solved equations too.
-        written = set().union(*(P.variables_of(x) for x in defs.quotients[f]))
-        mine = set(mine) | set(self._solved_tags(written))
+        written = set().union(*(P.variables_of(x) for f in fs for x in defs.quotients[f]))
+        mine = set(self._solved_tags(self._q_vars(names, defs) | written))
         return replace(
             verdict,
-            defs=tuple(sorted([*used, fname])),
+            defs=tuple(sorted([*used, *quotients])),
             solved=tuple(sorted(set(verdict.solved) | mine)),
         )
 
-    def _assuming(self, a: P.Poly, seeds: set[Var], tag: str) -> PolySolver | None:
-        """The fork for the assumption ``a = 0``: a child solver, or None over the cap.
+    def _rule_q(
+        self, q: Expr, defs: Defs, names: set[str], fname: str, d: P.Poly, nds: list
+    ) -> Verdict:
+        """Rule Q: split on f's denominator d: q Implied in both forks gives q.
+
+        One fork assumes d != 0 (nonzero index), the other d = 0 (a premise);
+        every model of this solver is a model of one of them. Each fork is
+        asked q again, so it resolves f (zero or unit) and splits on any
+        other open quotient itself, at most QUOTIENT_CAP forks deep.
+        """
+        if self._q_depth >= QUOTIENT_CAP:
+            return Unknown(f"Q: forks nested over the cap of {QUOTIENT_CAP}", "opaque")
+        seeds = self._q_vars(names, defs)
+        for n2, d2 in nds:
+            seeds |= P.variables_of(n2) | P.variables_of(d2)
+        parts, assumed = [], []
+        for nonzero, case in ((True, "!= 0"), (False, "= 0")):
+            tag = f"assume {fname}'s denominator {case}"
+            fork = self._assuming(d, seeds & self.declared, tag, nonzero=nonzero)
+            if fork is None:
+                return Unknown(f"Q: case {fname}'s denominator {case}: fork over the cap", "quotient")
+            v = fork.implies(q, defs)
+            if not isinstance(v, Implied):
+                # A decline inside the fork stays a decline; else the case failed.
+                kind = v.kind if v.kind in ("opaque", "expansion-limit") else "quotient"
+                return Unknown(f"Q: case {fname}'s denominator {case}: {v.note}", kind)
+            parts.append(v)
+            assumed.append(tag)
+        return self._merged("quotient-split", parts, assumed)
+
+    def _rule_u(
+        self, qp: P.Poly, sub: dict, zeros: list[Implied], units: dict[P.Key, str]
+    ) -> Verdict:
+        """Rule U (unit cancel): every quotient is resolved; decide q.
+
+        A unit f is n * inv(d). ``units`` holds the nonzero facts _classify
+        found for them (zero key -> tag), and only those: clear_denominators
+        clears inv(d) for a d among them, multiplying q by d, which keeps
+        q's zeros because d != 0. A zero f is 0, resting on its verdict
+        d = 0. With no unit this is rules N and S on q with every f = 0.
+        """
+        try:
+            a = self._apply_solved(P.substitute(qp, sub.get, self.p, self.max_terms))
+            atoms = P.variables_of(a) & self._inverse_of.keys()
+            # As this solver reads them: a fork may have solved more since.
+            inverse_of = {i: self._apply_solved(self._inverse_of[i]) for i in atoms}
+            cleared = P.clear_denominators(a, inverse_of, units, self.p, self.max_terms)
+        except P.ExpansionLimit:
+            return Unknown("expansion limit", "expansion-limit")
+        if cleared is None:
+            return Unknown("U: an inverse occurs squared", "opaque")
+        a, used = cleared
+        left = P.variables_of(a) & atoms
+        if left:
+            names = ", ".join(sorted(self.table.name(i) for i in left))
+            return Unknown(f"U: {names}: inverse of a polynomial not known nonzero", "quotient")
+        v = self._decide_cached(P.zkey(a, self.p))
+        if not isinstance(v, Implied):
+            return Unknown(f"U: {v.note}", "quotient")
+        rule = "unit-cancel" if used else v.rule
+        return self._merged(rule, [v, *zeros], {units[k] for k in used})
+
+    def _nonzero_contradicted(self) -> Implied | None:
+        """Some e assumed nonzero has e = 0 implied: then this fork has no model.
+
+        The verdict rests on e = 0 and the assumption's tag.
+        """
+        for e, tag in self._nonzero:
+            try:
+                k = P.zkey(self._apply_solved(e), self.p)
+            except P.ExpansionLimit:
+                continue
+            v = self._decide_cached(k)
+            if isinstance(v, Implied):
+                v = self._with_solved_tags(v, P.variables_of(e))
+                return replace(self._merged("trivial", [v], (tag,)), solved=v.solved)
+        return None
+
+    def _nonzero_keys(self) -> dict[P.Key, str]:
+        """The nonzero index as it reads now: zero key -> the assumption's tag.
+
+        Each entry is read under the solved equations (the fork may have
+        solved more since the assumption).
+        """
+        out: dict[P.Key, str] = {}
+        for e, tag in self._nonzero:
+            try:
+                k = P.zkey(self._apply_solved(e), self.p)
+            except P.ExpansionLimit:
+                continue
+            if k != P.ZERO:
+                out.setdefault(k, tag)
+        return out
+
+    def _classify(self, d: P.Poly) -> _Zero | _Unit | None:
+        """What this solver knows of a denominator d (under Sol); None if nothing.
+
+        The one place that decides between rule Q (None: open) and rule U.
+        Zero first: a d both zero and assumed nonzero is caught before
+        (_nonzero_contradicted).
+        """
+        k = P.zkey(d, self.p)
+        zero = self._decide_cached(k)
+        if isinstance(zero, Implied):
+            return _Zero(zero)
+        if P.is_constant(k):  # nonzero: no atom, nothing to clear
+            return _Unit(None, None)
+        tag = self._nonzero_keys().get(k)
+        return None if tag is None else _Unit(k, tag)
+
+    def _inverse(self, d: P.Poly) -> P.Poly:
+        """``1 / d``: a constant if d is one, else c * I for the inverse atom I of D.
+
+        d = c * D with D monic; I is shared by every d with the same zero
+        key. Only a name: I * D = 1 is used only where D is known nonzero
+        (rule U, through the nonzero index).
+        """
+        k = P.zkey(d, self.p)
+        c_inv = pow(P.lead_coeff(d), self.p - 2, self.p)
+        if P.is_constant(k):
+            return P.const(c_inv, self.p)
+        atom = self._atom_for.get(k)
+        if atom is None:
+            atom = self.table.fresh("inv")
+            self._atom_for[k] = atom
+            self._inverse_of[atom] = dict(k)
+        return P.scale(P.var_poly(atom), c_inv, self.p)
+
+    def _assuming(
+        self, a: P.Poly, seeds: set[Var], tag: str, nonzero: bool = False
+    ) -> PolySolver | None:
+        """The fork for the assumption ``a = 0`` (or ``a != 0``): a child solver, or None over the cap.
 
         It gets, on the same table: the premises within FORK_HOPS of
         ``seeds`` (as written, with their tags), the solved equations those
-        premises mention, the domains of the variables involved, and the
-        premise ``a`` under ``tag``; then its work list runs, and the
-        equations read off ``a``'s squares are checked (add_solved_all). Every copied
-        fact holds in every model of this solver's P and R (invariant I), so
-        every such model with a = 0 is a model of the fork's inputs: what
-        the fork proves holds in all of them. Leaving facts out is sound.
-        A contradiction in the fork means no model has a = 0; nothing is
-        made of that.
+        premises mention, the domains of the variables involved, this
+        solver's nonzero index, and the assumption under ``tag``: the
+        premise ``a``, or with ``nonzero`` the entry ``a`` in the nonzero
+        index. Then its work list runs, and for ``a = 0`` the equations read
+        off ``a``'s squares are checked (add_solved_all). Every copied
+        fact holds in every model of this solver (invariant I), so every
+        such model with the assumption is a model of the fork's inputs:
+        what the fork proves holds in all of them. Leaving facts out is
+        sound. A contradiction in the fork means no model has the
+        assumption; nothing is made of that.
         """
         ids: set[int] = set()
         frontier, seen = set(seeds), set()
@@ -1202,6 +1365,9 @@ class PolySolver:
             self._use_nowrap_pins,
         )
         child.declared = self.declared
+        child._inverse_of, child._atom_for = self._inverse_of, self._atom_for
+        child._nonzero = list(self._nonzero)
+        child._q_depth = self._q_depth + 1
         involved = set(seeds)
         for i in ids:
             for v in self._premises[i].vars:
@@ -1219,6 +1385,10 @@ class PolySolver:
                 child._domains[v] = self._domains[v]
         for i in sorted(ids):
             child.add_premise(self._premises[i].expr, self._premises[i].tag)
+        if nonzero:
+            child._nonzero.append((a, tag))
+            child.propagate()
+            return child
         child.add_premise(self._poly_expr(a), tag)
         child.propagate()
         # The assumption may be a sum of squares, e.g. sum (a_i - b_i)^2. Its
