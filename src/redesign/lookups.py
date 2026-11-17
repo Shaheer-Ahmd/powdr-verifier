@@ -18,6 +18,9 @@ trusts it). Everything else reads the tables through it:
   be gated). Sound by the => direction.
 - ``prove`` (goal side): a candidate lookup holds if the solver entails
   some exact Case's ``when`` and ``row`` goals. Sound by the <= direction.
+  When mult is not a known constant, its Zero goals may instead be gated
+  (mult * e), the mirror of ``assume``: the lookup only claims a row where
+  mult != 0.
 
 This module only translates; PolySolver.entails does every proving step,
 the same call on both sides, so they recognise the same cases. ``cases``
@@ -213,17 +216,45 @@ class Proved:
 def prove(
     s: PolySolver, bi: dict, defs: Defs = NO_DEFS, program: Program | None = None
 ) -> Proved | None:
-    """The candidate lookup ``bi`` holds for every witness: some exact Case is entailed.
+    """The candidate lookup ``bi`` holds for every witness: mult != 0 => args is a row.
 
-    Its conditions and row goals all implied give  args is a row, whatever
-    mult is. None if no case is.
+    Tried in turn, the first that is implied wins:
+    - some exact Case's conditions and row goals: args is a row, whatever
+      mult is;
+    - unless mult is a known nonzero constant, mult = 0: the lookup asserts
+      nothing (case "mult-zero");
+    - if mult is not a known constant, the same Case with every Zero goal e
+      (in ``when`` and ``row``) gated as mult * e, Bounded goals as they are
+      (case "<name>-gated"). Where mult != 0, mult * e = 0 gives e = 0 (F_p
+      has no zero divisors), so the case is selected and exact: a row.
+      Where mult = 0 the lookup asserts nothing.
+
+    Cases are still proposed by the values the solver knows outright; a
+    value known only where mult != 0 does not propose one. None if nothing
+    is implied.
     """
-    for c in cases(bi, _value(s, defs), program):
+    value = _value(s, defs)
+    mult = bi["mult"]
+    known = value(mult)
+    gate = known is None
+    if not known:  # unknown, or 0 under the solved equations
+        v = s.implies(mult, defs)
+        if isinstance(v, Implied):
+            return Proved("mult-zero", v)
+    for c in cases(bi, value, program):
         if not c.exact:
             continue
         v = s.entails(c.when + c.row, defs)
         if isinstance(v, Implied):
             return Proved(c.name, v)
+        if gate:
+            gated = tuple(
+                Zero([mult, "*", g.e]) if isinstance(g, Zero) else g
+                for g in c.when + c.row
+            )
+            v = s.entails(gated, defs)
+            if isinstance(v, Implied):
+                return Proved(f"{c.name}-gated", v)
     return None
 
 

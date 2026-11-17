@@ -31,7 +31,9 @@ table", where the table is an uninterpreted predicate. Its obligation I[w]:
                PolySolver.interval) and identities (by implies) proved, e.g.
                a range check's bound, or z = x for xor with y = 0. The
                reference's lookups give premises and ranges from the same
-               cases (lookups.assume). Holds whatever the multiplicity is
+               cases (lookups.assume). Holds whatever the multiplicity is,
+               or, with Zero goals gated by a non-constant multiplicity
+               (mult * e), wherever it is nonzero; or mult = 0 is implied
   program-semantics - the same for a PcLookup (trust_program): its pc is
                proved to be a constant c and every argument equal to the
                program's row at c, with arguments that need not be constant

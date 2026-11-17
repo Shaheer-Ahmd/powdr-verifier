@@ -182,3 +182,34 @@ def test_program_case_needs_the_program_and_a_known_pc():
     proved = L.prove(s, bi, program=PROGRAM)
     assert proved is not None and proved.case == "pc100"
     assert L.prove(s, bi) is None  # untrusted: no program, no proof
+
+
+def test_gated_candidate_lookup_is_proved_where_mult_is_nonzero():
+    # The reference gives z = x only where m != 0; the candidate's lookup has
+    # the same gate, so it holds: m != 0 => (x, 0, z, xor) is a row.
+    s = solver(["x", "z", "m"], premises=[["m", "*", ["z", "-", "x"]]], ranges=[("x", 255)])
+    bi = lookup(L.BITWISE_LOOKUP, "x", 0, "z", 1, mult="m")
+    proved = L.prove(s, bi)
+    assert proved is not None and proved.case == "xor-y0-gated"
+    # Ungated (mult 1), the same premises do not give a row.
+    assert L.prove(s, lookup(L.BITWISE_LOOKUP, "x", 0, "z", 1)) is None
+
+
+def test_gating_keeps_bounded_goals_unconditional():
+    # A range cannot be gated: without x's range the gated case is not proved.
+    s = solver(["x", "z", "m"], premises=[["m", "*", ["z", "-", "x"]]])
+    assert L.prove(s, lookup(L.BITWISE_LOOKUP, "x", 0, "z", 1, mult="m")) is None
+
+
+def test_gate_must_match_the_premise():
+    # z = x where n != 0 says nothing where m != 0.
+    s = solver(["x", "z", "m", "n"], premises=[["n", "*", ["z", "-", "x"]]], ranges=[("x", 255)])
+    assert L.prove(s, lookup(L.BITWISE_LOOKUP, "x", 0, "z", 1, mult="m")) is None
+
+
+def test_mult_implied_zero_proves_any_lookup():
+    s = solver(["x", "m"], premises=["m"])
+    proved = L.prove(s, lookup(L.VARIABLE_RANGE_CHECKER, "x", 8, mult="m"))
+    assert proved is not None and proved.case == "mult-zero"
+    # A constant mult is never gated: x has no range, so nothing is proved.
+    assert L.prove(s, lookup(L.VARIABLE_RANGE_CHECKER, "x", 8)) is None
