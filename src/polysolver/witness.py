@@ -29,17 +29,17 @@ def find_witness(
 ) -> dict[str, Expr] | None:
     """A term for each missing column inv_i, read off a premise, or None.
 
-    The candidate (Before) constraint looks like
+    The target constraint looks like
         x_1*inv_1 + ... + x_n*inv_n + c
-    and a premise (After) for some f in ``shortlist`` looks like
+    and a premise for some f in ``shortlist`` looks like
         f * (x_1' + ... + x_n') + c
-    where each x_i' is x_i (powdr did not square it) or x_i*x_i (it did).
+    where each x_i' is either x_i or x_i*x_i.
     We set inv_i := f in the first case and inv_i := f * x_i in the second.
-    Plugging these in turns the candidate into exactly the premise.
+    Plugging these in turns the target into exactly the premise.
 
-    Example (2103472):  Before  (a_0 - b_0)*inv_0 + ... - cmp
-                        After   f * ((a_0 - b_0)^2 + ...) - cmp
-                        so      inv_0 := f * (a_0 - b_0), ...
+    Example:  target   (a_0 - b_0)*inv_0 + ... - r
+              premise  f * ((a_0 - b_0)^2 + ...) - r
+              so       inv_0 := f * (a_0 - b_0), ...
     """
     unknowns = set(unknowns)
     # Every candidate constraint that mentions an inv_i has to hold in the end.
@@ -103,8 +103,8 @@ def _linear_in(solver, t, defs, unknowns) -> tuple[dict, dict] | None:
 def _read_off(solver, prem, f, x_of, c) -> dict[str, Expr] | None:
     """inv_i := f or f * x_i, if prem is written as  f * (x_1' + ... + x_n') + c.
 
-    Constant factors are allowed anywhere (e.g. cmp - f * (...), or powdr's
-    coefficients 2*x_1*inv_1 vs f * (2*x_1^2 + ...)); they end up in the witness.
+    Constant factors are allowed anywhere (e.g. r - f * (...), or the
+    coefficients in 2*x_1*inv_1 vs f * (2*x_1^2 + ...)); they end up in the witness.
     """
     p = solver.p
 
@@ -133,7 +133,7 @@ def _read_off(solver, prem, f, x_of, c) -> dict[str, Expr] | None:
     # After plugging in, the candidate is  f_scale * f * sum + c. We want it to be
     # a constant multiple of prem = f_coeff * f * sum + prem_rest, so that rule N
     # proves it: c = scale * prem_rest, and then f_scale = scale * f_coeff.
-    # Usually everything is 1; it is -1 when prem is written  cmp - f * (...).
+    # Usually everything is 1; it is -1 when prem is written  r - f * (...).
     if not c and not prem_rest:
         f_scale = 1
     else:

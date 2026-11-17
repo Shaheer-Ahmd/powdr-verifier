@@ -6,8 +6,11 @@ circuits: only variables, polynomials, ranges and definitions.
 
 Goals: ``Zero(e)`` is e = 0, decided by the rules below (``implies``);
 ``Bounded(e, hi)`` is 0 <= e <= hi on e's representative, decided by the
-interval of e over the domains (``bounded``). ``entails`` decides a
-conjunction of goals and returns one verdict resting on all of them.
+interval of e over the domains (``bounded``); ``AnyOf(options)`` holds if
+the goals of some option all hold, the options tried in order. ``entails``
+decides a conjunction of goals and returns one verdict resting on all of
+them. A goal that mentions a conditional definition is first split by
+rule I, and then decided in each case.
 
 The store:
 - P: premises, polynomials each read as "= 0" (add_premise). Trusted.
@@ -32,6 +35,10 @@ Rules that add to the store, each a local implication:
 - D (domain): a premise that mentions only x, each of whose top-level
   factors is a nonzero constant or a*x + b, gives x in {-b/a}: F_p has no
   zero divisors. So x - c pins x, and x(x - 1) gives {0, 1}.
+  In a fork (below), a premise over several variables is read the same way
+  once its factors known to be nonzero are dropped: a nonzero constant, a
+  factor in the nonzero index, or one whose interval excludes 0. So x * y
+  with y != 0 gives x = 0. Outside forks this is not tried (a cost policy).
 - O (one-hot), on a premise whose variables are all in [0, 1]:
   - group part: the premise reads x_1 + ... + x_n - c with c in {0, 1}.
     The integer sum is in [0, n] and n < p (the constructor requires
@@ -83,6 +90,16 @@ Rules that answer a query, q rewritten under Sol and Defs, cheapest first:
   F_p has no zero divisors. An inverse atom may occur only to the first
   power. If some e in the nonzero index has e = 0 implied, the fork has no
   model, and any query with a quotient holds there ("trivial").
+- I (conditional split): the goal mentions f := Cond(g, z, nz), which is z
+  if g = 0 and nz otherwise. Each guard g is read like a denominator: if
+  g = 0 is implied, f is z; if g is a nonzero constant or in the nonzero
+  index, f is nz. If some guard is neither, every model has g = 0 or
+  g != 0, so the goal is asked again in two forks, one with the premise
+  g = 0 and one with g in the nonzero index; Implied in both gives the
+  goal. A guard shared by several definitions is split on once, since the
+  fork decides it for all of them. The goal is split as a whole: an AnyOf
+  is decided per case, so its options may hold in different cases. At most
+  COND_CAP forks deep.
 
 The fork for an assumption a = 0 or a != 0 (_assuming) is a child solver
 holding a slice of this one's store (premises near the query, the solved
@@ -91,6 +108,9 @@ plus the assumption: the premise a, or a in the nonzero index. Every copied
 fact holds in every model of P and R (I), so every model of P and R with
 the assumption is a model of the fork's inputs, and a fork verdict holds
 there. In a fork, I reads: every model of P, R and the fork's assumptions.
+So an entry a * x + b of the nonzero index whose root -b/a is an end of
+x's domain removes that end (repeated until nothing changes): x != 0 with
+x in [0, 255] gives [1, 255].
 Any slice is sound; a smaller one loses completeness only. Fork verdicts
 serve one query and never enter this solver's caches.
 
@@ -138,7 +158,7 @@ from dataclasses import dataclass, field, replace
 from typing import NamedTuple
 
 from . import poly as P
-from .defs import NO_DEFS, Defs, InvalidDefs, Opaque, Quotient
+from .defs import NO_DEFS, Cond, Defs, InvalidDefs, Opaque, Quotient
 from .enumeration import GaveUp, NoSolution, fixed_values
 from .expr import Expr, product_factors, sum_terms, variables
 from .table import Var, VarTable
@@ -154,6 +174,8 @@ FORK_HOPS = 1
 FORK_PREMISE_CAP = 200
 # Rule Q splits on each quotient's denominator: at most 2^cap cases.
 QUOTIENT_CAP = 3
+# Rule I splits on each open guard: at most this many forks deep.
+COND_CAP = 6
 
 
 class UndefinedVariable(LookupError):
@@ -163,7 +185,8 @@ class UndefinedVariable(LookupError):
 @dataclass(frozen=True)
 class Implied:
     # "trivial" | "normalize" | "nowrap-split" | "sum" | "quotient-split" | "unit-cancel"
-    # for a Zero goal; "interval" for a Bounded one; "conjunction" for several
+    # | "cond-split" for a Zero goal; "interval" for a Bounded one; "conjunction"
+    # for several
     rule: str
     premises: tuple[str, ...] = ()  # tags of the premises used
     ranges: tuple[str, ...] = ()  # variables whose ranges were used
@@ -172,6 +195,9 @@ class Implied:
     # was itself checked when it was added (and may rest on earlier ones); a
     # pin (a collapsed range) contributes the tags of the premises behind it.
     solved: tuple[str, ...] = ()
+    # For an AnyOf: the labels of the options that held (one per case of a
+    # split; each label once, in the order first found).
+    chosen: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -179,7 +205,8 @@ class Unknown:
     note: str  # why each rule declined, for triage
     # Machine-readable reason: "opaque", "expansion-limit", "nonzero-constant",
     # "no-match", a near miss of rule S: "nowrap-missing-range", "nowrap-bound",
-    # or "quotient": rule Q applied and one of its two cases was not proved.
+    # or "quotient": rule Q applied and one of its two cases was not proved;
+    # "cond": the same for rule I.
     # For a Bounded goal: "no-interval" (not affine over ranged variables) or
     # "interval-bound" (an interval, but wider than the bound).
     kind: str = "no-match"
@@ -203,7 +230,36 @@ class Bounded:
     hi: int
 
 
-Goal = Zero | Bounded
+@dataclass(frozen=True)
+class AnyOf:
+    """Goal: the goals of some option all hold. Options are (label, goals), tried in order.
+
+    The label is the caller's name for the option, reported back in
+    ``Implied.chosen``.
+    """
+
+    options: tuple[tuple[str, tuple[Goal, ...]], ...]
+
+
+Goal = Zero | Bounded | AnyOf
+
+
+def _goal_names(g: Goal) -> set[str]:
+    """The variable names a goal mentions."""
+    if isinstance(g, AnyOf):
+        return set().union(*(_goal_names(x) for _, goals in g.options for x in goals))
+    return variables(g.e)
+
+
+def _rhs_names(rhs) -> set[str]:
+    """The variable names a right-hand side mentions, through every branch."""
+    if isinstance(rhs, Cond):
+        return variables(rhs.g) | _rhs_names(rhs.z) | _rhs_names(rhs.nz)
+    if isinstance(rhs, Quotient):
+        return variables(rhs.n) | variables(rhs.d)
+    if isinstance(rhs, Opaque):
+        return set()
+    return variables(rhs)
 
 
 class _ZeroDenominator(NamedTuple):
@@ -356,17 +412,19 @@ class PolySolver:
         self.case_split_unsat = 0  # searches with no fit: the premises contradict each other
         self.case_split_seconds = 0.0  # its own time
         self.nowrap_pins = 0  # variables rule S' pinned
-        self.forks = 0  # child solvers made for rule Q
+        self.forks = 0  # child solvers made for rules Q and I
         # Inverse atoms (poly.py): I -> the monic polynomial D it is the
         # inverse of, and D's zero key -> I. A definition only: it says
         # nothing about D being nonzero (that is the nonzero index). No
         # premise, solved value or domain mentions an atom. Shared with forks.
         self._inverse_of: dict[Var, P.Poly] = {}
         self._atom_for: dict[P.Key, Var] = {}
-        # Polynomials assumed nonzero (rule Q's d != 0 fork), with the
-        # assumption's tag: rule U reads them. Empty outside a fork.
+        # Polynomials assumed nonzero (the != 0 forks of rules Q and I), with
+        # the assumption's tag: rules U and I read them, and so do the
+        # domains and rule D's nonzero factors. Empty outside a fork.
         self._nonzero: list[tuple[P.Poly, str]] = []
         self._q_depth = 0  # how many rule Q forks deep this solver is
+        self._i_depth = 0  # how many rule I forks deep this solver is
         # (tag, last verdict, agreed with x's value) per equation, in call order
         self.solved_log: list[tuple[str, Verdict, bool]] = []
 
@@ -584,6 +642,8 @@ class PolySolver:
             self._requeue_premises_of([v])  # newly in [0, 1]: a premise over v may be a group now
         elif old is None and self._use_nowrap_pins:
             self._requeue_premises_of([v])  # newly ranged: a sum over v may not wrap now
+        elif lo >= 1 and (old is None or old.lo < 1) and self._in_fork():
+            self._requeue_premises_of([v])  # newly nonzero: a factor of a premise may drop now
         if self._waiting:  # rules S and C read domains
             self._wake(self._coi_premise_ids(v), (v,))
         if lo == hi and v not in self._solved:
@@ -667,9 +727,15 @@ class PolySolver:
         """Number of solved variables: accepted equations and pins."""
         return len(self._solved)
 
-    def make_defs(self, mapping: dict[str, Expr | Opaque | Quotient]) -> Defs:
-        """Validate definitions (D1 fresh, D2 flat, D3 polynomial, quotient or opaque)."""
-        polys, opaque, quotients = {}, set(), {}
+    def make_defs(self, mapping: dict[str, Expr | Opaque | Quotient | Cond]) -> Defs:
+        """Validate definitions (D1 fresh, D2 flat, D3 polynomial, quotient, cond or opaque).
+
+        A Cond's guard and branches are checked like any right-hand side (a
+        branch may be an expression, a Quotient or a Cond, not Opaque). A
+        Quotient whose denominator is a nonzero constant c is the polynomial
+        n * c^-1, and is stored as one.
+        """
+        polys, opaque, quotients, conds = {}, set(), {}, {}
 
         def as_written(name: str, rhs: Expr) -> P.Poly | None:
             for n in variables(rhs):  # raises UnsupportedExpr outside the grammar
@@ -682,6 +748,20 @@ class PolySolver:
             except P.ExpansionLimit:
                 return None  # queries through the variable report the limit
 
+        def check_branch(name: str, rhs) -> None:
+            """A Cond's branch: validated now, expanded when rule I picks it."""
+            if isinstance(rhs, Cond):
+                as_written(name, rhs.g)
+                check_branch(name, rhs.z)
+                check_branch(name, rhs.nz)
+            elif isinstance(rhs, Quotient):
+                as_written(name, rhs.n)
+                as_written(name, rhs.d)
+            elif isinstance(rhs, Opaque):
+                raise InvalidDefs(f"{name} := ... has an opaque branch")
+            else:
+                as_written(name, rhs)
+
         for name, rhs in mapping.items():
             v = self._var(name)
             if v in self.declared:
@@ -690,12 +770,22 @@ class PolySolver:
                 opaque.add(v)
             elif isinstance(rhs, Quotient):
                 n, d = as_written(name, rhs.n), as_written(name, rhs.d)
-                quotients[v] = None if n is None or d is None else (n, d)
+                if n is not None and d and d.keys() <= {()}:
+                    # d is a nonzero constant: n / d is a polynomial.
+                    polys[v] = P.scale(n, pow(d[()], self.p - 2, self.p), self.p)
+                else:
+                    quotients[v] = None if n is None or d is None else (n, d)
+            elif isinstance(rhs, Cond):
+                check_branch(name, rhs.z)
+                check_branch(name, rhs.nz)
+                conds[v] = (as_written(name, rhs.g), rhs.z, rhs.nz)
             else:
                 polys[v] = as_written(name, rhs)
-        return Defs(polys, frozenset(opaque), id(self.table), quotients)
+        return Defs(polys, frozenset(opaque), id(self.table), quotients, conds)
 
-    def extend_defs(self, defs: Defs, name: str, rhs: Expr | Opaque | Quotient) -> Defs:
+    def extend_defs(
+        self, defs: Defs, name: str, rhs: Expr | Opaque | Quotient | Cond
+    ) -> Defs:
         """``defs`` with ``name := rhs`` added (or replaced), validated like make_defs.
 
         Only the new right-hand side is expanded, so a caller trying several
@@ -711,7 +801,9 @@ class PolySolver:
         polys.update(one.polys)
         quotients = {x: t for x, t in defs.quotients.items() if x != v}
         quotients.update(one.quotients)
-        return Defs(polys, (defs.opaque - {v}) | one.opaque, defs.owner, quotients)
+        conds = {x: t for x, t in defs.conds.items() if x != v}
+        conds.update(one.conds)
+        return Defs(polys, (defs.opaque - {v}) | one.opaque, defs.owner, quotients, conds)
 
     # ------------------------------------------------------------ query
 
@@ -720,19 +812,27 @@ class PolySolver:
         if defs is not NO_DEFS and defs.owner != id(self.table):
             raise ValueError("defs were made by a solver with another table")
         names = variables(q)
-        # Sort q's non-declared variables into defined (used), quotient and
-        # opaque ones; anything else is a caller error.
-        used, opaque, quotients = [], [], []
+        # Sort q's non-declared variables into defined (used), quotient,
+        # conditional and opaque ones; anything else is a caller error.
+        used, opaque, quotients, conds = [], [], [], []
         for n in sorted(names):
             v = self._var(n)
             if v in self.declared:
                 continue
             if not defs.defines(v):
                 raise UndefinedVariable(f"{n} is neither declared nor defined")
-            kind = opaque if v in defs.opaque else quotients if v in defs.quotients else used
-            kind.append(n)
+            if v in defs.opaque:
+                opaque.append(n)
+            elif v in defs.conds:
+                conds.append(n)
+            elif v in defs.quotients:
+                quotients.append(n)
+            else:
+                used.append(n)
         if opaque:
             return Unknown(f"opaque: {', '.join(opaque)}", "opaque")
+        if conds:
+            return self._rule_i(Zero(q), defs, conds)
         if quotients:
             return self._rule_quotients(q, defs, quotients, used, names)
 
@@ -769,7 +869,13 @@ class PolySolver:
         return self.implies([a, "-", b], defs)
 
     def bounded(self, e: Expr, hi: int, defs: Defs = NO_DEFS) -> Verdict:
-        """Is ``0 <= e <= hi`` implied, for e's representative? Decided by ``interval``."""
+        """Is ``0 <= e <= hi`` implied, for e's representative? Decided by ``interval``.
+
+        If ``e`` mentions a conditional definition, rule I splits first.
+        """
+        conds = self._cond_names(variables(e), defs)
+        if conds:
+            return self._rule_i(Bounded(e, hi), defs, conds)
         iv = self.interval(e, defs)
         if iv is None:
             return Unknown("interval: not affine over ranged variables", "no-interval")
@@ -785,19 +891,15 @@ class PolySolver:
     def entails(self, goals: Iterable[Goal], defs: Defs = NO_DEFS) -> Verdict:
         """Is every goal implied? One verdict for the conjunction.
 
-        A Zero goal is decided by ``implies``, a Bounded one by ``bounded``.
-        Implied rests on everything the goals' verdicts rest on (a single
-        goal's verdict is returned as it is; no goals is "trivial"); Unknown
-        is the first goal that is not implied, with its kind.
+        A Zero goal is decided by ``implies``, a Bounded one by ``bounded``,
+        an AnyOf by its options (_any_of). Implied rests on everything the
+        goals' verdicts rest on (a single goal's verdict is returned as it
+        is; no goals is "trivial"); Unknown is the first goal that is not
+        implied, with its kind.
         """
         parts: list[Implied] = []
         for i, g in enumerate(goals):
-            if isinstance(g, Zero):
-                v = self.implies(g.e, defs)
-            elif isinstance(g, Bounded):
-                v = self.bounded(g.e, g.hi, defs)
-            else:
-                raise TypeError(f"not a goal: {g!r}")
+            v = self._entail_one(g, defs)
             if isinstance(v, Unknown):
                 return Unknown(f"goal {i} {g}: {v.note}", v.kind)
             parts.append(v)
@@ -805,6 +907,50 @@ class PolySolver:
             return parts[0]
         merged = self._merged("conjunction" if parts else "trivial", parts)
         return replace(merged, defs=tuple(sorted({n for v in parts for n in v.defs})))
+
+    def _entail_one(self, g: Goal, defs: Defs) -> Verdict:
+        """One goal: Zero by implies, Bounded by bounded, AnyOf by its options."""
+        if isinstance(g, Zero):
+            return self.implies(g.e, defs)
+        if isinstance(g, Bounded):
+            return self.bounded(g.e, g.hi, defs)
+        if isinstance(g, AnyOf):
+            return self._any_of(g, defs)
+        raise TypeError(f"not a goal: {g!r}")
+
+    def _any_of(self, g: AnyOf, defs: Defs) -> Verdict:
+        """Some option's goals all hold: the first option entailed, in order.
+
+        If any option mentions a conditional definition, rule I splits the
+        whole goal first, so the options are tried in each case separately
+        (one may hold in one case and another in the next). Implied carries
+        the label of the option that held in ``chosen``.
+        """
+        conds = self._cond_names(_goal_names(g), defs)
+        if conds:
+            return self._rule_i(g, defs, conds)
+        notes, kind = [], None
+        for label, goals in g.options:
+            v = self.entails(goals, defs)
+            if isinstance(v, Implied):
+                return replace(v, chosen=(label,))
+            notes.append(f"{label}: {v.note}")
+            kind = kind or v.kind
+        return Unknown("no option holds: " + "; ".join(notes), kind or "no-match")
+
+    def _cond_names(self, names: Iterable[str], defs: Defs) -> list[str]:
+        """The names among ``names`` that ``defs`` defines by a Cond, sorted."""
+        if not defs.conds:
+            return []
+        out = []
+        for n in names:
+            try:
+                v = self._var(n)
+            except UndefinedVariable:
+                continue  # the caller's check reports it
+            if v in defs.conds:
+                out.append(n)
+        return sorted(out)
 
     def normal_form(
         self, e: Expr, defs: Defs = NO_DEFS, free: Iterable[str] = ()
@@ -870,6 +1016,14 @@ class PolySolver:
         nf = self.normal_form(e, defs)
         if nf is None:
             return None
+        iv = self._interval_of(dict(nf))
+        if iv is None:
+            return None
+        lo, hi, used = iv
+        return lo, hi, tuple(self.table.name(v) for v in used)
+
+    def _interval_of(self, a: P.Poly) -> tuple[int, int, list[Var]] | None:
+        """(lo, hi, ranged variables) for the expanded polynomial ``a``, as in ``interval``."""
         p = self.p
 
         def signed(c: int) -> int:
@@ -877,7 +1031,7 @@ class PolySolver:
 
         lo = hi = 0
         used = []
-        for m, k in nf:
+        for m, k in a.items():
             k = signed(k)
             if m == ():
                 lo += k
@@ -891,10 +1045,10 @@ class PolySolver:
                 return None
             lo += k * (d.lo if k > 0 else d.hi)
             hi += k * (d.hi if k > 0 else d.lo)
-            used.append(self.table.name(v))
+            used.append(v)
         if lo < 0 or hi >= p:
             return None
-        return lo, hi, tuple(used)
+        return lo, hi, used
 
     def premises_mentioning(self, name: str) -> list[Expr]:
         """The premises, as written, that mention the variable ``name``.
@@ -1191,6 +1345,7 @@ class PolySolver:
             tuple(sorted({t for v in parts for t in v.premises} | set(premises))),
             tuple(sorted({t for v in parts for t in v.ranges})),
             solved=tuple(sorted({t for v in parts for t in v.solved})),
+            chosen=tuple(dict.fromkeys(c for v in parts for c in v.chosen)),
         )
 
     # ------------------------------------------------------------ rule Q
@@ -1322,6 +1477,101 @@ class PolySolver:
         rule = "unit-cancel" if used else v.rule
         return self._merged(rule, [v, *zeros], {units[k] for k in used})
 
+    # ------------------------------------------------------------ rule I
+
+    def _rule_i(self, goal: Goal, defs: Defs, conds: list[str]) -> Verdict:
+        """The goal mentions f := Cond(g, z, nz): resolve each f, or split (rule I).
+
+        Each guard g is read in this solver, under the solved equations,
+        exactly as rule Q reads a denominator (_classify):
+        - zero: g = 0 is implied, so f is z;
+        - unit: g is a nonzero constant or in the nonzero index, so f is nz;
+        - open: neither.
+        With no open guard the goal is asked again under the resolved
+        definitions (a branch may itself be a Cond or a Quotient). Otherwise
+        rule I splits on the first open guard (_rule_i_split). Nothing is
+        cached: the verdict depends on the definitions.
+        """
+        if self._i_depth >= COND_CAP:
+            return Unknown(f"I: forks nested over the cap of {COND_CAP}", "opaque")
+        vacuous = self._nonzero_contradicted()
+        if vacuous is not None:  # no model is in this fork: anything holds
+            return replace(vacuous, defs=tuple(conds))
+        resolved, zeros, opened = defs, [], None
+        for name in conds:
+            g, z, nz = defs.conds[self._var(name)]
+            if g is None:
+                return Unknown("expansion limit", "expansion-limit")
+            try:
+                g = self._apply_solved(g)
+            except P.ExpansionLimit:
+                return Unknown("expansion limit", "expansion-limit")
+            c = self._classify(g)
+            if isinstance(c, _ZeroDenominator):
+                resolved = self.extend_defs(resolved, name, z)
+                zeros.append(c.verdict)
+            elif isinstance(c, _Unit):
+                resolved = self.extend_defs(resolved, name, nz)
+            elif opened is None:
+                opened = (name, g)
+        if opened is not None:
+            return self._rule_i_split(goal, resolved, conds, *opened)
+        v = self._entail_one(goal, resolved)
+        if not isinstance(v, Implied) or not zeros:
+            return v
+        # It also rests on the guards found zero.
+        merged = self._merged(v.rule, [v, *zeros])
+        return replace(merged, defs=v.defs, chosen=v.chosen)
+
+    def _rule_i_split(
+        self, goal: Goal, defs: Defs, conds: list[str], fname: str, g: P.Poly
+    ) -> Verdict:
+        """Rule I: split on f's guard g: the goal Implied in both forks gives the goal.
+
+        One fork assumes g != 0 (nonzero index), the other g = 0 (a premise);
+        every model of this solver is a model of one of them. Each fork is
+        asked the goal again, so it resolves f, and every other definition
+        with the same guard, and splits on any other open guard itself, at
+        most COND_CAP forks deep.
+        """
+        seeds = P.variables_of(g)
+        for n in _goal_names(goal):
+            seeds |= self._seed_vars(n, defs)
+        parts, assumed = [], []
+        for nonzero, case in ((True, "!= 0"), (False, "= 0")):
+            tag = f"assume {fname}'s guard {case}"
+            fork = self._assuming(g, seeds & self.declared, tag, nonzero=nonzero, rule="I")
+            if fork is None:
+                return Unknown(f"I: case {fname}'s guard {case}: fork over the cap", "cond")
+            v = fork._entail_one(goal, defs)
+            if not isinstance(v, Implied):
+                # A decline inside the fork stays a decline; else the case failed.
+                kind = v.kind if v.kind in ("opaque", "expansion-limit") else "cond"
+                return Unknown(f"I: case {fname}'s guard {case}: {v.note}", kind)
+            parts.append(v)
+            assumed.append(tag)
+        return replace(self._merged("cond-split", parts, assumed), defs=tuple(conds))
+
+    def _seed_vars(self, name: str, defs: Defs) -> set[Var]:
+        """The declared variables behind ``name``: itself, or those its definition mentions."""
+        try:
+            v = self._var(name)
+        except UndefinedVariable:
+            return set()
+        if v in self.declared:
+            return {v}
+        if v in defs.polys:
+            return P.variables_of(defs.polys[v]) if defs.polys[v] else set()
+        if v in defs.quotients:
+            nd = defs.quotients[v]
+            return set().union(*(P.variables_of(x) for x in nd)) if nd else set()
+        if v in defs.conds:
+            g, z, nz = defs.conds[v]
+            names = _rhs_names(z) | _rhs_names(nz)
+            out = P.variables_of(g) if g else set()
+            return out | {self._var(n) for n in names}
+        return set()
+
     def _nonzero_contradicted(self) -> Implied | None:
         """Some e assumed nonzero has e = 0 implied: then this fork has no model.
 
@@ -1389,7 +1639,7 @@ class PolySolver:
         return P.scale(P.var_poly(atom), c_inv, self.p)
 
     def _assuming(
-        self, a: P.Poly, seeds: set[Var], tag: str, nonzero: bool = False
+        self, a: P.Poly, seeds: set[Var], tag: str, nonzero: bool = False, rule: str = "Q"
     ) -> PolySolver | None:
         """The fork for the assumption ``a = 0`` (or ``a != 0``): a child solver, or None over the cap.
 
@@ -1404,7 +1654,8 @@ class PolySolver:
         such model with the assumption is a model of the fork's inputs:
         what the fork proves holds in all of them. Leaving facts out is
         sound. A contradiction in the fork means no model has the
-        assumption; nothing is made of that.
+        assumption; nothing is made of that. ``rule`` ("Q" or "I") says
+        whose depth the fork adds to: each rule has its own cap.
         """
         ids: set[int] = set()
         frontier, seen = set(seeds), set()
@@ -1432,7 +1683,8 @@ class PolySolver:
         child.declared = self.declared
         child._inverse_of, child._atom_for = self._inverse_of, self._atom_for
         child._nonzero = list(self._nonzero)
-        child._q_depth = self._q_depth + 1
+        child._q_depth = self._q_depth + (rule == "Q")
+        child._i_depth = self._i_depth + (rule == "I")
         involved = set(seeds)
         for i in ids:
             for v in self._premises[i].vars:
@@ -1452,16 +1704,69 @@ class PolySolver:
             child.add_premise(self._premises[i].expr, self._premises[i].tag)
         if nonzero:
             child._nonzero.append((a, tag))
-            child.propagate()
+            child._settle()
             return child
         child.add_premise(self._poly_expr(a), tag)
-        child.propagate()
+        child._settle()
         # The assumption may be a sum of squares, e.g. sum (a_i - b_i)^2. Its
         # equations a_i = b_i are proposed like any hint, and rule S checks them.
         proposed = child._square_equations(len(child._premises) - 1, tag)
         if proposed:
             child.add_solved_all(proposed)
         return child
+
+    def _settle(self) -> None:
+        """A new fork: narrow domains by the nonzero index and propagate, until both are done.
+
+        Propagation can pin or narrow a variable so that an entry's root
+        becomes an end of its domain, and the other way round.
+        """
+        self._narrow_by_nonzero()
+        self.propagate()
+        while self._narrow_by_nonzero():
+            self.propagate()
+
+    def _narrow_by_nonzero(self) -> bool:
+        """Remove from x's domain the root of a nonzero entry a*x + b at its end; True if any.
+
+        Premise: e = a*x + b (under the solved equations) is in the nonzero
+        index, so x != -b/a in every model of this fork. If the root is x's
+        lo (or hi) it is removed, and so is a root in x's finite set of
+        values. Repeated until nothing changes, as one removal can bring
+        another root to the end (x != 0, then x != 1). Tags: the domain's and
+        the assumption's.
+        """
+        any_change, changed = False, True
+        while changed:
+            changed = False
+            for e, tag in self._nonzero:
+                try:
+                    a = self._apply_solved(e)
+                except P.ExpansionLimit:
+                    continue
+                vs = P.variables_of(a)
+                if len(vs) != 1:
+                    continue
+                (x,) = vs
+                lin = ((x, 1),)
+                if not a.keys() <= {(), lin} or not a.get(lin):
+                    continue
+                root = -a.get((), 0) * pow(a[lin], self.p - 2, self.p) % self.p
+                d = self._domains.get(x)
+                if d is None or d.lo == d.hi:
+                    continue
+                if d.values is not None:
+                    if root in d.values:
+                        changed |= self._narrow_domain(x, d.lo, d.hi, [tag], d.values - {root})
+                elif root == d.lo:
+                    changed |= self._narrow_domain(x, d.lo + 1, d.hi, [tag])
+                elif root == d.hi:
+                    changed |= self._narrow_domain(x, d.lo, d.hi - 1, [tag])
+            any_change |= changed
+        return any_change
+
+    def _in_fork(self) -> bool:
+        return self._q_depth + self._i_depth > 0
 
     def _poly_expr(self, a: P.Poly) -> Expr:
         """A polynomial written back as an expression over names."""
@@ -1482,6 +1787,8 @@ class PolySolver:
         if len(vs) == 1:
             self._rule_d(i, *vs)
             return
+        if len(vs) > 1 and self._in_fork():
+            self._rule_d_nonzero(i)
         if vs and self._use_one_hot and all(self._in_01(v) for v in vs):
             self._rule_o(i)
         if vs and self._use_nowrap_pins and all(v in self._domains for v in vs):
@@ -1743,6 +2050,59 @@ class PolySolver:
         tags = self._premise_tags(i)
         if self._narrow_domain(x, min(values), max(values), tags, values) and len(roots) == 1:
             self._pinned_by_constant.add(x)  # counted as a constant, not a one-hot pin
+
+    def _rule_d_nonzero(self, i: int) -> None:
+        """Rule D for premise i over several variables, once its nonzero factors are dropped.
+
+        Premise: i's top-level factors, as written and reduced under the
+        solved equations. A factor is known nonzero if it is a nonzero
+        constant, its key is in the nonzero index, or its interval excludes
+        0. If every other factor is a*x + b in one variable x, then x is one
+        of their roots, as F_p has no zero divisors. Tags: the premise, the
+        nonzero assumptions and the domains the dropped factors rest on.
+        Only in forks (a cost policy, see the module docstring).
+        """
+        self._premise_factors(i)
+        prem = self._drop_stale(self._premises[i])
+        nonzero = self._nonzero_keys()
+        dropped: list[str] = []
+        kept: list[P.Poly] = []
+        for fi in range(len(prem.factors)):
+            f = self._factor_poly(prem, fi)
+            if not f:
+                return  # 0 (the premise says nothing) or too big
+            if f.keys() <= {()}:
+                continue  # a nonzero constant
+            tag = nonzero.get(P.zkey(f, self.p))
+            if tag is not None:
+                dropped.append(tag)
+                continue
+            iv = self._interval_of(f)
+            if iv is not None and iv[0] >= 1:
+                dropped += self._domain_tags(iv[2])
+                continue
+            kept.append(f)
+        if not dropped or not kept:
+            return  # nothing dropped: rule D's or no rule's; all dropped: no model
+        xs = set().union(*(P.variables_of(f) for f in kept))
+        if len(xs) != 1:
+            return
+        (x,) = xs
+        lin = ((x, 1),)
+        roots = set()
+        for f in kept:
+            if not f.keys() <= {(), lin}:
+                return
+            roots.add(-f.get((), 0) * pow(f[lin], self.p - 2, self.p) % self.p)
+        if len(roots) == 1:
+            if not (self._use_constants or self._use_one_hot and self._in_01(x)):
+                return
+        elif not self._use_one_hot:
+            return
+        values = frozenset(roots)
+        tags = self._premise_tags(i) + dropped
+        if self._narrow_domain(x, min(values), max(values), tags, values) and len(roots) == 1:
+            self._pinned_by_constant.add(x)
 
     def _factor_roots(self, i: int, x: Var) -> tuple[int, ...] | None:
         """The roots -b/a if each factor of premise i is a nonzero constant or a*x + b."""
