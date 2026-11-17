@@ -4,7 +4,7 @@ import itertools
 
 import pytest
 
-from src.polysolver import BABYBEAR, Bounded, PolySolver, VarTable, Zero, poly
+from src.polysolver import BABYBEAR, Bounded, Cond, PolySolver, Quotient, VarTable, Zero, poly
 from src.redesign import lookups as L
 
 P = BABYBEAR
@@ -213,3 +213,30 @@ def test_mult_implied_zero_proves_any_lookup():
     assert proved is not None and proved.case == "mult-zero"
     # A constant mult is never gated: x has no range, so nothing is proved.
     assert L.prove(s, lookup(L.VARIABLE_RANGE_CHECKER, "x", 8)) is None
+
+
+def one_limb_comparator(flag_if_one):
+    """A one-byte "b < 1" gadget's range check, with conditional definitions.
+
+    m flags the limb unless b = 1 (``flag_if_one`` flips that), and dv is
+    1 where b = 0, else b - 1. The send has mult m and args [dv - 1, 0, 0, 0]:
+    where b = 1, dv - 1 = -1 is not a byte, so only m = 0 makes it hold.
+    """
+    s = solver(["b"], ranges=[("b", 255)])
+    m = Cond(["b", "-", 1], 1, 0) if flag_if_one else Cond(["b", "-", 1], 0, 1)
+    defs = s.make_defs({"m": m, "dv": Cond("b", 1, Quotient(["b", "-", 1], 1))})
+    bi = lookup(L.BITWISE_LOOKUP, ["dv", "-", 1], 0, 0, 0, mult="m")
+    return s, bi, defs
+
+
+def test_conditional_mult_is_decided_case_by_case():
+    s, bi, defs = one_limb_comparator(flag_if_one=False)
+    proved = L.prove(s, bi, defs)
+    assert proved is not None
+    assert set(proved.case.split("|")) == {"mult-zero", "and0"}
+    assert proved.verdict.rule == "cond-split"
+
+
+def test_conditional_mult_with_a_wrong_definition_is_not_proved():
+    s, bi, defs = one_limb_comparator(flag_if_one=True)
+    assert L.prove(s, bi, defs) is None

@@ -18,9 +18,10 @@ trusts it). Everything else reads the tables through it:
   be gated). Sound by the => direction.
 - ``prove`` (goal side): a candidate lookup holds if the solver entails
   some exact Case's ``when`` and ``row`` goals. Sound by the <= direction.
-  When mult is not a known constant, its Zero goals may instead be gated
-  (mult * e), the mirror of ``assume``: the lookup only claims a row where
-  mult != 0.
+  When mult is not a known constant, mult = 0 also does, and so does a Case
+  with its Zero goals gated (mult * e), the mirror of ``assume``: the lookup
+  only claims a row where mult != 0. All of these are the options of one
+  AnyOf goal, so a split on a conditional column decides them per case.
 
 This module only translates; PolySolver.entails does every proving step,
 the same call on both sides, so they recognise the same cases. ``cases``
@@ -35,7 +36,17 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from src.polysolver import NO_DEFS, Bounded, Defs, Expr, Goal, Implied, PolySolver, Zero
+from src.polysolver import (
+    NO_DEFS,
+    AnyOf,
+    Bounded,
+    Defs,
+    Expr,
+    Goal,
+    Implied,
+    PolySolver,
+    Zero,
+)
 
 PC_LOOKUP = 2  # [pc, opcode, a, ..., g]: the program's instruction at pc
 VARIABLE_RANGE_CHECKER = 3  # [x, bits]: x < 2^bits
@@ -209,8 +220,8 @@ def _value(s: PolySolver, defs: Defs = NO_DEFS) -> Callable[[Expr], int | None]:
 
 @dataclass(frozen=True)
 class Proved:
-    case: str
-    verdict: Implied  # the conjunction of the case's conditions and row
+    case: str  # the option that held; "a|b" if different ones held in different cases
+    verdict: Implied  # what that option's goals rest on
 
 
 def prove(
@@ -218,16 +229,20 @@ def prove(
 ) -> Proved | None:
     """The candidate lookup ``bi`` holds for every witness: mult != 0 => args is a row.
 
-    Tried in turn, the first that is implied wins:
-    - some exact Case's conditions and row goals: args is a row, whatever
-      mult is;
+    One AnyOf goal, whose options are tried in this order:
     - unless mult is a known nonzero constant, mult = 0: the lookup asserts
-      nothing (case "mult-zero");
+      nothing (option "mult-zero");
+    - for each exact Case, its conditions and row goals: args is a row,
+      whatever mult is (option "<name>");
     - if mult is not a known constant, the same Case with every Zero goal e
       (in ``when`` and ``row``) gated as mult * e, Bounded goals as they are
-      (case "<name>-gated"). Where mult != 0, mult * e = 0 gives e = 0 (F_p
-      has no zero divisors), so the case is selected and exact: a row.
+      (option "<name>-gated"). Where mult != 0, mult * e = 0 gives e = 0
+      (F_p has no zero divisors), so the case is selected and exact: a row.
       Where mult = 0 the lookup asserts nothing.
+
+    Without conditional definitions the first option entailed wins. With
+    them, PolySolver splits the whole goal once and tries the options in
+    each case, so mult = 0 can hold in one case and a row in another.
 
     Cases are still proposed by the values the solver knows outright; a
     value known only where mult != 0 does not propose one. None if nothing
@@ -237,25 +252,25 @@ def prove(
     mult = bi["mult"]
     known = value(mult)
     gate = known is None
+    options: list[tuple[str, tuple[Goal, ...]]] = []
     if not known:  # unknown, or 0 under the solved equations
-        v = s.implies(mult, defs)
-        if isinstance(v, Implied):
-            return Proved("mult-zero", v)
+        options.append(("mult-zero", (Zero(mult),)))
     for c in cases(bi, value, program):
         if not c.exact:
             continue
-        v = s.entails(c.when + c.row, defs)
-        if isinstance(v, Implied):
-            return Proved(c.name, v)
+        options.append((c.name, c.when + c.row))
         if gate:
             gated = tuple(
                 Zero([mult, "*", g.e]) if isinstance(g, Zero) else g
                 for g in c.when + c.row
             )
-            v = s.entails(gated, defs)
-            if isinstance(v, Implied):
-                return Proved(f"{c.name}-gated", v)
-    return None
+            options.append((f"{c.name}-gated", gated))
+    if not options:
+        return None
+    v = s.entails([AnyOf(tuple(options))], defs)
+    if not isinstance(v, Implied):
+        return None
+    return Proved("|".join(v.chosen), v)
 
 
 # ------------------------------------------------------------ premise side
