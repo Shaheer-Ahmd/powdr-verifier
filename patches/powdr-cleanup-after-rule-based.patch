@@ -1,0 +1,22 @@
+diff --git a/autoprecompiles/src/constraint_optimizer.rs b/autoprecompiles/src/constraint_optimizer.rs
+index d5b10bc2e..43dd92185 100644
+--- a/autoprecompiles/src/constraint_optimizer.rs
++++ b/autoprecompiles/src/constraint_optimizer.rs
+@@ -122,6 +122,17 @@ pub fn optimize_constraints<
+     }));
+     stats_logger.log("rule-based optimization", &constraint_system);
+     export_options.register_substituted_variables(assignments);
++
++    // A rule can leave columns that no longer reach a stateful bus. For example,
++    // after a less-than gadget is replaced by an is-zero check, its markers keep
++    // only their booleanity constraints and a range-check send. Remove them here,
++    // in the same step, instead of carrying them into the next iteration.
++    let constraint_system =
++        remove_disconnected_columns(constraint_system, solver, bus_interaction_handler.clone());
++    stats_logger.log(
++        "removing disconnected columns after rule-based optimization",
++        &constraint_system,
++    );
+     export_options
+         .export_optimizer_inner_constraint_system(constraint_system.system(), "rule_based");
+ 

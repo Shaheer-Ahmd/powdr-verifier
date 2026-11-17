@@ -57,6 +57,7 @@ DISCHARGED_ROWS = [
     ("sum", "direct", "G * (t1 + ... + tn), with every G * tj implied"),
     ("sum", "via mapping", "same, after substituting mapped columns"),
     ("quotient-split", "via mapping", "a QuotientOrZero column: both cases of its denominator"),
+    ("cond-split", "via mapping", "an IfEqZero column (powdr's recipe): every case of its guards"),
 ]
 RUNG_NOTE = {
     "trivial": "rung 1",
@@ -65,6 +66,7 @@ RUNG_NOTE = {
     "nowrap-split": "PolySolver rule S",
     "sum": "PolySolver rule L",
     "quotient-split": "PolySolver rule Q",
+    "cond-split": "PolySolver rule I",
 }
 # The same for stateless bus interactions.
 BUS_ROWS = [
@@ -88,7 +90,8 @@ BUS_RUNG_NOTE = {
     "evaluated": "rung 3, table row (not PcLookup)",
     "evaluated-program": "rung 3, PcLookup row; trusts the dump's block as the program",
     "congruence": "rung 4, PolySolver implies_equal",
-    "table-semantics": "rung 5, lookups.prove: PolySolver.entails on a case's goals",
+    "table-semantics": "rung 5, lookups.prove: PolySolver.entails on a case's goals"
+    " (split per case by rule I over IfEqZero columns)",
     "program-semantics": "rung 5, lookups.prove on a PcLookup; trusts the dump's block",
 }
 

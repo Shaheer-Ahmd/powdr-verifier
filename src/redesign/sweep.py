@@ -5,8 +5,8 @@ reference side's constraints and byte ranges. The rungs, cheapest first:
 
   trivial    - c[w] is identically zero (canonical key is empty)
   identical  - c[w] has the same canonical key as a reference constraint
-  normalize / nowrap-split / sum / quotient-split - PolySolver proves it
-               (rules N, S, L, Q)
+  normalize / nowrap-split / sum / quotient-split / cond-split - PolySolver
+               proves it (rules N, S, L, Q, I)
   undecided  - nothing applied; left for the SMT rungs (not built yet)
 
 A stateless bus interaction (a lookup) is the fact "mult != 0 => args in
@@ -33,7 +33,10 @@ table", where the table is an uninterpreted predicate. Its obligation I[w]:
                reference's lookups give premises and ranges from the same
                cases (lookups.assume). Holds whatever the multiplicity is,
                or, with Zero goals gated by a non-constant multiplicity
-               (mult * e), wherever it is nonzero; or mult = 0 is implied
+               (mult * e), wherever it is nonzero; or mult = 0 is implied.
+               A lookup over columns with a conditional definition (mapping
+               source "recipe") comes straight here: PolySolver's rule I
+               splits on the guards, and these options are tried per case
   program-semantics - the same for a PcLookup (trust_program): its pc is
                proved to be a constant c and every argument equal to the
                program's row at c, with arguments that need not be constant
@@ -52,6 +55,7 @@ from src.lens.canon import CanonError, canon_value, canon_zero
 from src.lens.diff import _bus_exact_key
 from src.polysolver import (
     BABYBEAR,
+    Cond,
     Expr,
     Implied,
     Opaque,
@@ -78,6 +82,7 @@ DISCHARGED = (
     "nowrap-split",
     "sum",
     "quotient-split",
+    "cond-split",
     "evaluated",
     "evaluated-program",
     "congruence",
@@ -114,6 +119,8 @@ REASONS = {
     "quotient case not proved": "rule Q split on a QuotientOrZero column's"
     " denominator, and one of the two cases does not follow",
     "opaque IfEqZero": "needs the meaning of an IfEqZero column",
+    "cond case not proved": "rule I split on an IfEqZero column's guard, and one"
+    " of the cases does not follow",
     "opaque other": "needs the meaning of a non-polynomial derived column",
     "opaque extra definition": "a second, non-polynomial definition of a column",
     "near miss: range missing": "rule S fits, but a summand has no range",
@@ -213,9 +220,9 @@ def sweep(
     report = Report(direction, mapping)
     defs = solver.make_defs(mapping.defs)
     # Polynomial definitions can be written into c to get c[w] for the
-    # canonical rungs. Opaque, quotient or unmapped columns cannot, so they
-    # skip to PolySolver.
-    not_poly = (Opaque, Quotient)
+    # canonical rungs. Opaque, quotient, conditional or unmapped columns
+    # cannot, so they skip to PolySolver.
+    not_poly = (Opaque, Quotient, Cond)
     poly_defs = {c: d for c, d in mapping.defs.items() if not isinstance(d, not_poly)}
     blocked = mapping.unmapped | {
         c for c, d in mapping.defs.items() if isinstance(d, not_poly)
@@ -302,6 +309,17 @@ def sweep(
             return Obligation(name, "undecided", detail, reason=reason, kind="bus")
         # Opaque columns cannot be written into I, so there is no I[w] to match.
         opaque = cols & blocked
+        if opaque and all(isinstance(mapping.defs.get(c), Cond) for c in opaque):
+            # Conditional columns: only the table's meaning can decide it, with
+            # PolySolver splitting on their guards (rung 5, lookups.prove).
+            ob = _by_table_semantics(name, bi, defs, solver, mapped, program) if table_rung else None
+            if ob is not None:
+                return ob
+            detail = "cond: " + ", ".join(sorted(opaque))
+            return Obligation(
+                name, "undecided", detail, reason="cond case not proved",
+                via_mapping=mapped, kind="bus",
+            )
         if opaque:
             detail = "opaque: " + ", ".join(sorted(opaque))
             reason = _reason("opaque", cols, mapping)
@@ -503,6 +521,7 @@ _KIND_REASON = {
     "nowrap-bound": "near miss: sum may wrap",
     "no-match": "no single premise",
     "quotient": "quotient case not proved",
+    "cond": "cond case not proved",
 }
 
 
@@ -518,6 +537,8 @@ def _reason(kind: str, cols: set[str], mapping: Mapping) -> str:
             kinds |= set(d.content)
         elif isinstance(d, Quotient):
             kinds.add("QuotientOrZero")
+        elif isinstance(d, Cond):
+            kinds.add("IfEqZero")
     if kinds == {"QuotientOrZero"}:
         return "opaque QuotientOrZero"
     if kinds == {"IfEqZero"}:

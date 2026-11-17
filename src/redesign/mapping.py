@@ -10,9 +10,14 @@ Sources, in priority order:
                      mention: 0, else the root of a lookup argument
   6. zero          - soundness only: 0 for a group the witness search could
                      not map, kept if PolySolver then proves its constraints
+  7. recipe        - soundness only: when 0 fails, powdr's own recipe for each
+                     column of the group, with IfEqZero read as PolySolver's
+                     Cond (rule I). Before's recipe, else After's: powdr keeps
+                     an entry for a column it stops constraining (is_new =
+                     false), and that entry is how its prover fills the column.
 
 In soundness a derived recipe PolySolver cannot read (IfEqZero, QuotientOrZero)
-is skipped, so the column goes on to sources 3 to 6.
+is skipped at source 2, so the column goes on to sources 3 to 7.
 
 Any mapping is sound: a poor choice can only make an obligation unprovable,
 never prove a wrong pass (``flip_quant``). So the heuristics here are free to
@@ -24,6 +29,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from src.polysolver import (
+    Cond,
     Defs,
     Expr,
     Implied,
@@ -31,6 +37,7 @@ from src.polysolver import (
     Opaque,
     PolySolver,
     Quotient,
+    UndefinedVariable,
     UnsupportedExpr,
     find_uniform_witness,
     find_witness,
@@ -56,9 +63,9 @@ class Mapping:
     """The witness w for one direction, plus what we learned building it."""
 
     # Candidate-only column -> its term over reference columns.
-    defs: dict[str, Expr | Opaque | Quotient] = field(default_factory=dict)
+    defs: dict[str, Expr | Opaque | Quotient | Cond] = field(default_factory=dict)
     # Column -> which source defined it: "derived", "substitution", "witness",
-    # "zero witness", "lookup-only zero" or "lookup-only root".
+    # "zero witness", "recipe", "lookup-only zero" or "lookup-only root".
     source: dict[str, str] = field(default_factory=dict)
     # Columns no source could define; their obligations stay undecided.
     unmapped: set[str] = field(default_factory=set)
@@ -87,9 +94,16 @@ def completeness_mapping(
 
 
 def soundness_mapping(
-    after: Circuit, before: Circuit, subs: dict[str, Expr], solver: PolySolver
+    after: Circuit,
+    before: Circuit,
+    subs: dict[str, Expr],
+    solver: PolySolver,
+    use_recipe_witness: bool = True,
 ) -> Mapping:
-    """w': Before columns -> terms over After columns. ``solver`` holds After's premises."""
+    """w': Before columns -> terms over After columns. ``solver`` holds After's premises.
+
+    ``use_recipe_witness``: try source 7 (powdr's recipes) when 0 fails.
+    """
     m = Mapping()
     # Before-only columns: try the recorded sources first.
     left = [
@@ -133,6 +147,11 @@ def soundness_mapping(
             # Last: 0 for every column, e.g. markers whose only constraint is
             # booleanity (their recipe is an IfEqZero we do not read).
             w, source = _zero_witness(solver, m.defs, group, targets), "zero witness"
+        if w is None and use_recipe_witness:
+            # Then powdr's own recipes, e.g. LessThan markers that are a decision
+            # tree on the input bytes. Not checked here: the sweep checks every
+            # obligation, and a wrong case leaves them undecided.
+            w, source = _recipe_witness(solver, m.defs, group, before, after), "recipe"
         if w is None:
             m.unmapped |= group  # reported, never guessed
             for col in group:
@@ -142,10 +161,12 @@ def soundness_mapping(
         for col in group:
             m.source[col] = source
         # Report one entry per distinct term: in the linear case all inv_i share
-        # f (one entry), in the squared case each has its own f * x_i.
+        # f (one entry), in the squared case each has its own f * x_i. A recipe
+        # is reported as powdr wrote it (JSON, unlike PolySolver's Cond).
         shared: dict[str, tuple[list[str], Expr]] = {}  # repr(term) -> (columns, term)
         for col in sorted(group):
-            shared.setdefault(repr(w[col]), ([], w[col]))[0].append(col)
+            term = _first_recipe(col, before, after) if source == "recipe" else w[col]
+            shared.setdefault(repr(term), ([], term))[0].append(col)
         m.witnesses += shared.values()
     return m
 
@@ -208,6 +229,55 @@ def _constraint_columns(c: Circuit) -> set[str]:
     return (
         set().union(*(variables(e) for e in c.constraints)) if c.constraints else set()
     )
+
+
+def _recipe_witness(
+    solver: PolySolver, base_w: dict, group: set[str], cand: Circuit, ref: Circuit
+) -> dict[str, Expr | Quotient | Cond] | None:
+    """powdr's recipe for every column of ``group``, as definitions over ``ref``; else None.
+
+    Each column's first recipe in the candidate's ``derived``, else the
+    reference's, translated by _recipe_cond. None if a column has no recipe,
+    a recipe has a part PolySolver cannot read or mentions a column ``ref``
+    lacks, or PolySolver rejects the definitions.
+    """
+    w: dict[str, Expr | Quotient | Cond] = {}
+    for col in sorted(group):
+        recipe = _first_recipe(col, cand, ref)
+        if recipe is None:
+            return None
+        rhs = _recipe_cond(recipe, ref)
+        if rhs is None:
+            return None
+        w[col] = rhs
+    try:
+        solver.make_defs({**base_w, **w})
+    except (InvalidDefs, UnsupportedExpr, UndefinedVariable):
+        return None
+    return w
+
+
+def _first_recipe(col: str, cand: Circuit, ref: Circuit) -> dict | None:
+    """``col``'s first recipe in the candidate's ``derived``, else the reference's."""
+    recipes = cand.derived.get(col) or ref.derived.get(col)
+    return recipes[0] if recipes else None
+
+
+def _recipe_cond(recipe: dict, ref: Circuit) -> Expr | Quotient | Cond | None:
+    """A recipe as a definition, reading IfEqZero(g, z, nz) as Cond; None if any part is opaque."""
+    if not isinstance(recipe, dict):
+        return None  # not a recipe (each branch of an IfEqZero is one)
+    if set(recipe) == {"IfEqZero"} and len(recipe["IfEqZero"]) == 3:
+        g, z, nz = recipe["IfEqZero"]
+        try:
+            if not variables(g) <= ref.columns:
+                return None
+        except UnsupportedExpr:
+            return None
+        zt, nzt = _recipe_cond(z, ref), _recipe_cond(nz, ref)
+        return None if zt is None or nzt is None else Cond(g, zt, nzt)
+    rhs = _recipe_def(recipe, ref)
+    return None if isinstance(rhs, Opaque) else rhs
 
 
 def _zero_witness(

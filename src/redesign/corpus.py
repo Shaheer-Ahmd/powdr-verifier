@@ -44,6 +44,7 @@ def run_sweep(
     use_table_rung: bool = True,
     trust_execution: bool = True,
     use_program_facts: bool = True,
+    use_recipe_witness: bool = True,
     passes: Iterable[str] = (),
     on_pair: Callable[[list[dict], list[Report | None], Circuit, Circuit], None]
     | None = None,
@@ -109,6 +110,7 @@ def run_sweep(
                     entry_pc,
                     trust_execution,
                     use_program_facts,
+                    use_recipe_witness,
                 )
             except MissingDefinition as exc:
                 # Only completeness raises; still record soundness separately.
@@ -132,6 +134,7 @@ def run_sweep(
                         entry_pc,
                         trust_execution,
                         use_program_facts,
+                        use_recipe_witness,
                     )
                 pair = [_error(base, "completeness", str(exc))]
                 pair += [_record(base, r) for r in reports[1:]]
@@ -161,6 +164,7 @@ def run_sweep(
         "table_rung": use_table_rung,
         "trust_execution": trust_execution,
         "program_facts": use_program_facts and trust_program,
+        "recipe_witness": use_recipe_witness,
         "seconds": round(time.monotonic() - start, 1),
         "created": datetime.now().astimezone().isoformat(timespec="seconds"),
         "verifier_commit": _commit(),

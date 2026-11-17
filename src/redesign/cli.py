@@ -92,6 +92,12 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="add no premises from the program row at a PcLookup's constant pc",
     )
+    c.add_argument(
+        "--no-recipe-witness",
+        action="store_true",
+        help="soundness: do not fall back on powdr's recipes (IfEqZero read by rule I)"
+        " for columns the witness search and 0 could not map",
+    )
     c.add_argument("--root", type=Path, help="dump root (default: powdr-dumps)")
     c.add_argument("--json", action="store_true", help="machine-readable output")
     c.add_argument("-v", "--verbose", action="store_true", help="list every obligation")
@@ -157,6 +163,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-program-facts",
         action="store_true",
         help="add no premises from the program row at a PcLookup's constant pc",
+    )
+    s.add_argument(
+        "--no-recipe-witness",
+        action="store_true",
+        help="soundness: do not fall back on powdr's recipes (IfEqZero read by rule I)"
+        " for columns the witness search and 0 could not map",
     )
     s.add_argument(
         "--pass",
@@ -340,6 +352,7 @@ def _sweep(args, directions) -> int:
                 use_table_rung=not args.no_table_rung,
                 trust_execution=not args.no_trust_execution,
                 use_program_facts=not args.no_program_facts,
+                use_recipe_witness=not args.no_recipe_witness,
                 passes=args.passes,
                 on_pair=record if db else None,
             )
@@ -435,6 +448,7 @@ def main(argv: list[str] | None = None) -> int:
             not args.no_table_rung,
             not args.no_trust_execution,
             not args.no_program_facts,
+            not args.no_recipe_witness,
         )
     except (ResolveError, FileNotFoundError, MissingDefinition) as exc:
         print(f"redesign: {type(exc).__name__}: {exc}", file=sys.stderr)

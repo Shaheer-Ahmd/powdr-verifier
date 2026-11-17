@@ -47,6 +47,7 @@ def check_step(
     entry_pc: int | None = None,
     trust_execution: bool = True,
     use_program_facts: bool = True,
+    use_recipe_witness: bool = True,
 ) -> list[Report]:
     """Completeness: Before is the reference. Soundness: After is.
 
@@ -90,7 +91,7 @@ def check_step(
             use_lookup_facts=use_lookup_facts,
             **trusted,
         )
-        m = soundness_mapping(after, before, subs, solver) # <- Polysolver used to find missing witnesses
+        m = soundness_mapping(after, before, subs, solver, use_recipe_witness)
         reports.append(sweep("soundness", after, before, m, solver, program=program, table_rung=use_table_rung))
     return reports
 
@@ -114,6 +115,7 @@ def check(
     use_table_rung: bool = True,
     trust_execution: bool = True,
     use_program_facts: bool = True,
+    use_recipe_witness: bool = True,
 ) -> list[Report]:
     before = load_step(group, block, step_from, root)
     after = load_step(group, block, step_to, root)
@@ -136,4 +138,5 @@ def check(
         load_entry_pc(group, block, root),
         trust_execution,
         use_program_facts,
+        use_recipe_witness,
     )
